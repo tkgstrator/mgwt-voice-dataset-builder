@@ -1,0 +1,5 @@
+error[E0599]: no method named `with_verified_path` found for reference `&VerifiedSnapshot` in the current scope
+ --> tests/ui/snapshot_path_cannot_escape.rs:4:26
+  |
+4 |     let _path = snapshot.with_verified_path(|path| path.to_path_buf());
+  |                          ^^^^^^^^^^^^^^^^^^ method not found in `&VerifiedSnapshot`

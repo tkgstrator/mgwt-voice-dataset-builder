@@ -354,9 +354,64 @@ pub struct VerifiedBundleInputs {
 /// One bundle session's exact peak snapshot working set.
 #[derive(Debug)]
 pub struct VerifiedSnapshotSet {
-    pub bundle: VerifiedSnapshot,
-    pub resources: Vec<VerifiedSnapshot>,
-    pub reserved_bytes: u64,
+    bundle: VerifiedSnapshot,
+    resources: Vec<VerifiedSnapshot>,
+    reserved_bytes: u64,
+}
+impl VerifiedSnapshotSet {
+    pub fn bundle(&self) -> &VerifiedSnapshot {
+        &self.bundle
+    }
+    pub fn resources(&self) -> &[VerifiedSnapshot] {
+        &self.resources
+    }
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reserved_bytes
+    }
+    fn verify_all(&self) -> Result<(), AppError> {
+        self.bundle.verify_owned_bytes()?;
+        for resource in &self.resources {
+            resource.verify_owned_bytes()?;
+        }
+        Ok(())
+    }
+    /// Open a lazy bundle parser while retaining its bundle and resource snapshots.
+    pub fn start_parser_session<P>(
+        self,
+        open: impl FnOnce(&Path, &[(String, std::path::PathBuf)]) -> Result<P, AppError>,
+    ) -> Result<VerifiedBundleParserSession<P>, AppError> {
+        self.verify_all()?;
+        let bundle_path = self.bundle.descriptor_path();
+        let resource_paths: Vec<_> = self
+            .resources
+            .iter()
+            .map(|resource| (resource.relative_path.clone(), resource.descriptor_path()))
+            .collect();
+        let parser = open(&bundle_path, &resource_paths)?;
+        self.verify_all()?;
+        Ok(VerifiedBundleParserSession {
+            parser,
+            snapshots: self,
+        })
+    }
+}
+/// A lazy parser with its entire verified bundle/resource working set held alive.
+#[derive(Debug)]
+pub struct VerifiedBundleParserSession<P> {
+    parser: P,
+    snapshots: VerifiedSnapshotSet,
+}
+impl<P> VerifiedBundleParserSession<P> {
+    pub fn run(self, consume: impl FnOnce(&mut P) -> Result<(), AppError>) -> Result<(), AppError> {
+        let Self {
+            mut parser,
+            snapshots,
+        } = self;
+        let result = consume(&mut parser);
+        drop(parser);
+        snapshots.verify_all()?;
+        result
+    }
 }
 impl VerifiedBundleInputs {
     pub fn snapshot_set(&mut self, scratch: &Path) -> Result<VerifiedSnapshotSet, AppError> {
@@ -414,12 +469,12 @@ impl VerifiedBundleInputs {
     }
 }
 pub trait DependencyDiscovery {
-    fn discover(&self, bundle: &VerifiedInputFile) -> Result<Vec<String>, AppError>;
+    fn discover(&self, bundle: &VerifiedSnapshot) -> Result<Vec<String>, AppError>;
 }
 #[derive(Debug, Default)]
 pub struct NoDependencies;
 impl DependencyDiscovery for NoDependencies {
-    fn discover(&self, _bundle: &VerifiedInputFile) -> Result<Vec<String>, AppError> {
+    fn discover(&self, _bundle: &VerifiedSnapshot) -> Result<Vec<String>, AppError> {
         Ok(Vec::new())
     }
 }
@@ -427,14 +482,15 @@ pub fn open_bundle_inputs(
     app: &ValidatedAppPath,
     manifest: &ApprovedManifest,
     bundle_path: &str,
+    scratch: &Path,
     discovery: &impl DependencyDiscovery,
-) -> Result<VerifiedBundleInputs, AppError> {
+) -> Result<VerifiedSnapshotSet, AppError> {
     let bundle = manifest
         .bundles
         .iter()
         .find(|b| b.relative_path == bundle_path)
         .ok_or_else(|| invalid("unapproved bundle"))?;
-    let bundle = VerifiedInputFile::open(
+    let mut bundle = VerifiedInputFile::open(
         app,
         &InputEntry {
             relative_path: bundle.relative_path.clone(),
@@ -442,7 +498,16 @@ pub fn open_bundle_inputs(
             sha256: bundle.sha256.clone(),
         },
     )?;
-    let found = discovery.discover(&bundle)?;
+    let scratch_fd = validate_scratch_outside_app(&bundle.root, scratch)?;
+    let bundle_size = bundle.size;
+    let bundle_snapshot = VerifiedSnapshot::copy_once_on_bound(
+        &mut bundle,
+        rustix::io::dup(&scratch_fd)
+            .map_err(|e| invalid(format!("duplicate scratch descriptor: {e}")))?,
+        bundle_size,
+        &mut |_| Ok(()),
+    )?;
+    let found = discovery.discover(&bundle_snapshot)?;
     let mut resources = Vec::new();
     for name in found {
         let expected = manifest
@@ -455,7 +520,37 @@ pub fn open_bundle_inputs(
     if resources.len() != manifest.resources.len() {
         return Err(invalid("declared dependency resource not discovered"));
     }
-    Ok(VerifiedBundleInputs { bundle, resources })
+    let remaining_bytes = resources
+        .iter()
+        .try_fold(0_u64, |sum, resource| sum.checked_add(resource.size))
+        .ok_or_else(|| invalid("resource snapshot working set overflow"))?;
+    let reserved_bytes = bundle_size
+        .checked_add(remaining_bytes)
+        .ok_or_else(|| invalid("bundle snapshot working set overflow"))?;
+    let free = fs::fstatvfs(&scratch_fd)
+        .map_err(|e| invalid(format!("check resource snapshot disk space: {e}")))?;
+    let available = (free.f_bavail as u64)
+        .checked_mul(free.f_frsize as u64)
+        .ok_or_else(|| invalid("disk capacity overflow"))?;
+    if available < remaining_bytes {
+        return Err(invalid("insufficient resource snapshot disk space"));
+    }
+    let mut resource_snapshots = Vec::with_capacity(resources.len());
+    for mut resource in resources {
+        let size = resource.size;
+        resource_snapshots.push(VerifiedSnapshot::copy_once_on_bound(
+            &mut resource,
+            rustix::io::dup(&scratch_fd)
+                .map_err(|e| invalid(format!("duplicate scratch descriptor: {e}")))?,
+            size,
+            &mut |_| Ok(()),
+        )?);
+    }
+    Ok(VerifiedSnapshotSet {
+        bundle: bundle_snapshot,
+        resources: resource_snapshots,
+        reserved_bytes,
+    })
 }
 
 /// Callbacks at deterministic snapshot boundaries support cancellation and race checks.
@@ -515,10 +610,39 @@ impl Drop for OwnedSnapshotDir {
 pub struct VerifiedSnapshot {
     owned: OwnedSnapshotDir,
     file: File,
-    pub size: u64,
-    pub sha256: String,
+    relative_path: String,
+    size: u64,
+    sha256: String,
+}
+/// A lazy parser kept alive together with the verified snapshot descriptor.
+#[derive(Debug)]
+pub struct VerifiedParserSession<P> {
+    parser: P,
+    snapshot: VerifiedSnapshot,
+}
+impl<P> VerifiedParserSession<P> {
+    /// Consume the parser while its snapshot remains held, then verify after consumption.
+    pub fn run(self, consume: impl FnOnce(&mut P) -> Result<(), AppError>) -> Result<(), AppError> {
+        let Self {
+            mut parser,
+            snapshot,
+        } = self;
+        let result = consume(&mut parser);
+        drop(parser);
+        snapshot.verify_owned_bytes()?;
+        result
+    }
 }
 impl VerifiedSnapshot {
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
     pub fn copy_once(
         input: &mut VerifiedInputFile,
         scratch: &Path,
@@ -623,6 +747,7 @@ impl VerifiedSnapshot {
         Ok(Self {
             owned,
             file,
+            relative_path: input.relative_path.clone(),
             size,
             sha256: digest,
         })
@@ -647,15 +772,42 @@ impl VerifiedSnapshot {
         Ok(())
     }
 
-    /// Hand a path-only parser the held read-only file descriptor, with before/after verification.
-    pub fn with_verified_path<T>(&self, parse: impl FnOnce(&Path) -> T) -> Result<T, AppError> {
+    /// Read the verified copy through a bounded-lifetime reader for dependency discovery.
+    pub fn with_reader<T>(
+        &self,
+        inspect: impl FnOnce(&mut dyn Read) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.verify_owned_bytes()?;
+        let fd = fs::openat(
+            &self.owned.stage,
+            self.sha256.as_str(),
+            FILE_FLAGS,
+            Mode::empty(),
+        )
+        .map_err(|e| invalid(format!("open snapshot reader: {e}")))?;
+        let mut file = File::from(fd);
+        let result = inspect(&mut file);
+        self.verify_owned_bytes()?;
+        result
+    }
+
+    /// Open a path-only lazy parser and retain this snapshot until its consumption finishes.
+    pub fn start_parser_session<P>(
+        self,
+        open: impl FnOnce(&Path) -> Result<P, AppError>,
+    ) -> Result<VerifiedParserSession<P>, AppError> {
+        self.verify_owned_bytes()?;
+        let descriptor_path = self.descriptor_path();
+        let parser = open(&descriptor_path)?;
+        self.verify_owned_bytes()?;
+        Ok(VerifiedParserSession {
+            parser,
+            snapshot: self,
+        })
+    }
+    fn descriptor_path(&self) -> std::path::PathBuf {
         use std::os::fd::AsRawFd;
-        self.verify_owned_bytes()?;
-        let descriptor_path =
-            std::path::PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()));
-        let result = parse(&descriptor_path);
-        self.verify_owned_bytes()?;
-        Ok(result)
+        std::path::PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()))
     }
 }
 

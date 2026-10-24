@@ -14,6 +14,19 @@ fn entry(name: &str, bytes: &[u8]) -> InputEntry {
 }
 use sha2::Digest;
 
+fn snapshot_bytes(snapshot: &mgwt_voice_dataset_builder::inventory::VerifiedSnapshot) -> Vec<u8> {
+    use mgwt_voice_dataset_builder::error::AppError;
+    snapshot
+        .with_reader(|reader| {
+            let mut bytes = Vec::new();
+            reader
+                .read_to_end(&mut bytes)
+                .map_err(|e| AppError::processing(e.to_string()))?;
+            Ok(bytes)
+        })
+        .unwrap()
+}
+
 #[test]
 fn inventory_hashes_bound_bytes_and_reports_drift() {
     let root = tempfile::tempdir_in(".").unwrap();
@@ -31,12 +44,7 @@ fn inventory_hashes_bound_bytes_and_reports_drift() {
         3,
     )
     .unwrap();
-    assert_eq!(
-        held.with_verified_path(|path| fs::read(path))
-            .unwrap()
-            .unwrap(),
-        b"abc"
-    );
+    assert_eq!(snapshot_bytes(&held), b"abc");
     fs::write(root.path().join("Contents/one.bundle"), b"abd").unwrap();
     assert!(inventory_entries(&app, &[want]).is_err());
 }
@@ -66,18 +74,15 @@ fn snapshot_copies_verified_bytes_and_cleans_owned_directory() {
     let app = ValidatedAppPath::new(root.path()).unwrap();
     let mut input = VerifiedInputFile::open(&app, &entry("Contents/one.bundle", b"abc")).unwrap();
     let snapshot = VerifiedSnapshot::copy_once(&mut input, scratch.path(), 3).unwrap();
-    assert_eq!(
-        snapshot
-            .with_verified_path(|path| fs::read(path))
-            .unwrap()
-            .unwrap(),
-        b"abc"
-    );
-    assert!(
-        snapshot
-            .with_verified_path(|path| fs::metadata(path).unwrap().permissions().readonly())
-            .unwrap()
-    );
+    assert_eq!(snapshot_bytes(&snapshot), b"abc");
+    let owned = fs::read_dir(scratch.path())
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let copied = fs::read_dir(owned).unwrap().next().unwrap().unwrap().path();
+    assert!(fs::metadata(copied).unwrap().permissions().readonly());
     assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
     drop(snapshot);
     assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
@@ -233,22 +238,9 @@ fn bundle_snapshot_reserves_exact_bundle_and_resource_sum() {
         resources: vec![resource],
     };
     let snapshots = inputs.snapshot_set(scratch.path()).unwrap();
-    assert_eq!(snapshots.reserved_bytes, 7);
-    assert_eq!(
-        snapshots
-            .bundle
-            .with_verified_path(|path| fs::read(path))
-            .unwrap()
-            .unwrap(),
-        b"abc"
-    );
-    assert_eq!(
-        snapshots.resources[0]
-            .with_verified_path(|path| fs::read(path))
-            .unwrap()
-            .unwrap(),
-        b"data"
-    );
+    assert_eq!(snapshots.reserved_bytes(), 7);
+    assert_eq!(snapshot_bytes(snapshots.bundle()), b"abc");
+    assert_eq!(snapshot_bytes(&snapshots.resources()[0]), b"data");
     assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 2);
     drop(snapshots);
     assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
@@ -276,7 +268,10 @@ fn candidate_publication_rejects_a_swapped_requested_parent() {
 
 #[test]
 fn verified_input_cannot_be_handed_directly_to_a_parser() {
-    trybuild::TestCases::new().compile_fail("tests/ui/verified_input_not_reader.rs");
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/ui/verified_input_not_reader.rs");
+    cases.compile_fail("tests/ui/snapshot_path_cannot_escape.rs");
+    cases.compile_fail("tests/ui/lazy_parser_cannot_escape.rs");
 }
 
 #[test]
@@ -379,13 +374,7 @@ fn immutable_snapshot_survives_post_verification_source_mutation() {
     let scratch = tempfile::tempdir_in(".").unwrap();
     let snapshot = VerifiedSnapshot::copy_once(&mut input, scratch.path(), 3).unwrap();
     fs::write(&source, b"abd").unwrap();
-    assert_eq!(
-        snapshot
-            .with_verified_path(|path| fs::read(path))
-            .unwrap()
-            .unwrap(),
-        b"abc"
-    );
+    assert_eq!(snapshot_bytes(&snapshot), b"abc");
 }
 
 #[test]
@@ -407,5 +396,205 @@ fn bundle_snapshot_rejects_resources_from_another_app_root() {
     };
     let scratch = tempfile::tempdir_in(".").unwrap();
     assert!(group.snapshot_set(scratch.path()).is_err());
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+fn synthetic_bundle_manifest(
+    bundle: InputEntry,
+    resource: InputEntry,
+) -> mgwt_voice_dataset_builder::config::ApprovedManifest {
+    use mgwt_voice_dataset_builder::config::{
+        AppIdentity, ApprovedManifest, BundleEntry, BundleKind,
+    };
+    ApprovedManifest {
+        schema_version: "manosaba-inputs-v1-portable".into(),
+        approval_state: "approved".into(),
+        app_identity: AppIdentity {
+            app_info_company: "Re,AER".into(),
+            app_info_product: "manosaba".into(),
+            bundle_identifier: "com.manosaba.game".into(),
+            bundle_version: "1".into(),
+            short_version: "1.1.2".into(),
+            unity_build_number: "170d2541580d".into(),
+        },
+        unity_version: "6000.0.48f1".into(),
+        bundles: vec![BundleEntry {
+            kind: BundleKind::Script,
+            relative_path: bundle.relative_path,
+            size: bundle.size,
+            sha256: bundle.sha256,
+        }],
+        identity_files: vec![],
+        resources: vec![resource],
+        script_bundle_count: 1,
+        voice_bundle_count: 0,
+        total_consumed_bytes: 7,
+    }
+}
+
+#[test]
+fn dependency_discovery_reads_verified_bundle_snapshot_and_owns_resource_session() {
+    use mgwt_voice_dataset_builder::{
+        error::AppError,
+        inventory::{DependencyDiscovery, VerifiedSnapshot, open_bundle_inputs},
+    };
+    struct Discover;
+    impl DependencyDiscovery for Discover {
+        fn discover(&self, bundle: &VerifiedSnapshot) -> Result<Vec<String>, AppError> {
+            let bytes = bundle.with_reader(|reader| {
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| AppError::processing(e.to_string()))?;
+                Ok(bytes)
+            })?;
+            assert_eq!(bytes, b"abc");
+            Ok(vec!["Contents/resource".into()])
+        }
+    }
+    let root = tempfile::tempdir_in(".").unwrap();
+    fs::create_dir(root.path().join("Contents")).unwrap();
+    fs::write(root.path().join("Contents/bundle"), b"abc").unwrap();
+    fs::write(root.path().join("Contents/resource"), b"data").unwrap();
+    let app = ValidatedAppPath::new(root.path()).unwrap();
+    let scratch = tempfile::tempdir_in(".").unwrap();
+    let manifest = synthetic_bundle_manifest(
+        entry("Contents/bundle", b"abc"),
+        entry("Contents/resource", b"data"),
+    );
+    let session = open_bundle_inputs(
+        &app,
+        &manifest,
+        "Contents/bundle",
+        scratch.path(),
+        &Discover,
+    )
+    .unwrap();
+    assert_eq!(session.reserved_bytes(), 7);
+    assert_eq!(session.resources().len(), 1);
+    assert_eq!(
+        session.resources()[0]
+            .with_reader(|reader| {
+                let mut b = Vec::new();
+                reader
+                    .read_to_end(&mut b)
+                    .map_err(|e| AppError::processing(e.to_string()))?;
+                Ok(b)
+            })
+            .unwrap(),
+        b"data"
+    );
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 2);
+    drop(session);
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn lazy_parser_session_retains_verified_snapshot_until_consumption_finishes() {
+    use mgwt_voice_dataset_builder::{error::AppError, inventory::VerifiedSnapshot};
+    struct LazyParser {
+        path: std::path::PathBuf,
+    }
+    impl LazyParser {
+        fn read_later(&self) -> Vec<u8> {
+            fs::read(&self.path).unwrap()
+        }
+    }
+    let root = tempfile::tempdir_in(".").unwrap();
+    fs::create_dir(root.path().join("Contents")).unwrap();
+    let source = root.path().join("Contents/bundle");
+    fs::write(&source, b"abc").unwrap();
+    let app = ValidatedAppPath::new(root.path()).unwrap();
+    let scratch = tempfile::tempdir_in(".").unwrap();
+    let mut input = VerifiedInputFile::open(&app, &entry("Contents/bundle", b"abc")).unwrap();
+    let snapshot = VerifiedSnapshot::copy_once(&mut input, scratch.path(), 3).unwrap();
+    let session = snapshot
+        .start_parser_session(|path| {
+            Ok::<_, AppError>(LazyParser {
+                path: path.to_path_buf(),
+            })
+        })
+        .unwrap();
+    fs::write(&source, b"abd").unwrap();
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 1);
+    let mut bytes = Vec::new();
+    session
+        .run(|parser| {
+            bytes = parser.read_later();
+            Ok::<(), AppError>(())
+        })
+        .unwrap();
+    assert_eq!(bytes, b"abc");
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn bundle_parser_session_retains_discovered_resource_snapshots_until_done() {
+    use mgwt_voice_dataset_builder::{
+        error::AppError,
+        inventory::{DependencyDiscovery, VerifiedSnapshot, open_bundle_inputs},
+    };
+    struct Resource;
+    impl DependencyDiscovery for Resource {
+        fn discover(&self, bundle: &VerifiedSnapshot) -> Result<Vec<String>, AppError> {
+            let bytes = bundle.with_reader(|reader| {
+                let mut b = Vec::new();
+                reader
+                    .read_to_end(&mut b)
+                    .map_err(|e| AppError::processing(e.to_string()))?;
+                Ok(b)
+            })?;
+            assert_eq!(bytes, b"abc");
+            Ok(vec!["Contents/resource".into()])
+        }
+    }
+    struct LazyParser {
+        bundle: std::path::PathBuf,
+        resources: Vec<std::path::PathBuf>,
+    }
+    let root = tempfile::tempdir_in(".").unwrap();
+    fs::create_dir(root.path().join("Contents")).unwrap();
+    fs::write(root.path().join("Contents/bundle"), b"abc").unwrap();
+    fs::write(root.path().join("Contents/resource"), b"data").unwrap();
+    let app = ValidatedAppPath::new(root.path()).unwrap();
+    let scratch = tempfile::tempdir_in(".").unwrap();
+    let manifest = synthetic_bundle_manifest(
+        entry("Contents/bundle", b"abc"),
+        entry("Contents/resource", b"data"),
+    );
+    let group = open_bundle_inputs(
+        &app,
+        &manifest,
+        "Contents/bundle",
+        scratch.path(),
+        &Resource,
+    )
+    .unwrap();
+    let session = group
+        .start_parser_session(|bundle, resources| {
+            Ok::<_, AppError>(LazyParser {
+                bundle: bundle.to_path_buf(),
+                resources: resources
+                    .iter()
+                    .map(|(name, path)| {
+                        assert_eq!(name, "Contents/resource");
+                        path.to_path_buf()
+                    })
+                    .collect(),
+            })
+        })
+        .unwrap();
+    assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 2);
+    fs::write(root.path().join("Contents/bundle"), b"abd").unwrap();
+    fs::write(root.path().join("Contents/resource"), b"late").unwrap();
+    let mut seen = Vec::new();
+    session
+        .run(|parser| {
+            seen.push(fs::read(&parser.bundle).unwrap());
+            seen.push(fs::read(&parser.resources[0]).unwrap());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen, vec![b"abc".to_vec(), b"data".to_vec()]);
     assert_eq!(fs::read_dir(scratch.path()).unwrap().count(), 0);
 }

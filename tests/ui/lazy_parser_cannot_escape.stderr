@@ -1,0 +1,17 @@
+error[E0308]: mismatched types
+ --> tests/ui/lazy_parser_cannot_escape.rs:7:44
+  |
+7 |     let _escaped = session.run(|parser| Ok(parser.clone()));
+  |                                         -- ^^^^^^^^^^^^^^ expected `()`, found `Lazy`
+  |                                         |
+  |                                         arguments to this enum variant are incorrect
+  |
+help: the type constructed contains `Lazy` due to the type of the argument passed
+ --> tests/ui/lazy_parser_cannot_escape.rs:7:41
+  |
+7 |     let _escaped = session.run(|parser| Ok(parser.clone()));
+  |                                         ^^^--------------^
+  |                                            |
+  |                                            this argument influences the type of `Ok`
+note: tuple variant defined here
+ --> $RUST/core/src/result.rs
