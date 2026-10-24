@@ -1,5 +1,6 @@
 //! Bundle-scoped access to the pinned pure-Rust Unity reader.
 use crate::{
+    audio::{AudioError, AudioErrorKind, CanonicalWavSink},
     error::{AppError, UnityErrorKind},
     inventory::{VerifiedBundleInputs, VerifiedSnapshotSet},
     model::{
@@ -8,7 +9,6 @@ use crate::{
         PredecodeFrameCount, RawScriptObject,
     },
 };
-use sha2::{Digest, Sha256};
 use std::{
     io::Write,
     path::{Path, PathBuf},
@@ -72,6 +72,8 @@ fn validate_frame_count(
 pub trait BundleSession {
     fn raw_script_objects(&mut self) -> Result<Vec<crate::model::RawScriptObject>, AppError>;
     fn audio_refs(&mut self) -> Result<Vec<crate::model::AudioAssetRef>, AppError>;
+    /// Stream canonical PCM into a caller-owned staged sink. A late validation
+    /// failure can leave partial bytes, so the caller must discard that stage.
     fn stream_audio(
         &mut self,
         reference: &crate::model::AudioAssetRef,
@@ -253,21 +255,39 @@ impl BundleSession for UnitySession {
             if predicted > expansion_cap {
                 return Err(unsupported("audio expansion ratio exceeds limit"));
             }
-            let mut bounded =
-                BoundedWavSink::new(sink, limits.maximum_wav_bytes.min(256 * 1024 * 1024));
-            let written = write_direct_wav(&asset.payload, kind, bounded.maximum, &mut bounded)
-                .map_err(decode_error)?;
-            if written != predicted || written != bounded.written {
+            let mut canonical = CanonicalWavSink::new(sink, limits.maximum_wav_bytes);
+            let written = write_direct_wav(&asset.payload, kind, predicted, &mut canonical)
+                .map_err(|error| match canonical.failure_kind() {
+                    Some(AudioErrorKind::Malformed) => candidate("decoded WAV is malformed"),
+                    Some(AudioErrorKind::Limit) => unsupported("canonical WAV exceeds hard limit"),
+                    Some(AudioErrorKind::Io) => {
+                        AppError::unity(UnityErrorKind::Io, "WAV destination write failed")
+                    }
+                    None => decode_error(error),
+                })?;
+            if written != predicted || written != canonical.source_bytes() {
                 return Err(unexpected("decoded WAV byte count disagrees"));
             }
-            let wav = bounded.finish(reference)?;
+            let wav = canonical.finish().map_err(canonical_error)?;
+            if wav.channels != reference.metadata.channels
+                || wav.sample_rate != reference.metadata.sample_rate
+                || wav.bits_per_sample != reference.metadata.bits_per_sample
+            {
+                return Err(candidate("decoded WAV properties disagree with TypeTree"));
+            }
             let frame_count_source =
                 validate_frame_count(reference.predecode_frames, wav.frame_count)?;
             self.peak_live_buffer_bytes =
                 self.peak_live_buffer_bytes.max(wav.peak_live_buffer_bytes);
             Ok(DecodedAudioReceipt {
+                wav_bytes: wav.wav_bytes,
+                wav_sha256: wav.wav_sha256,
+                channels: wav.channels,
+                sample_rate: wav.sample_rate,
+                bits_per_sample: wav.bits_per_sample,
+                frame_count: wav.frame_count,
                 frame_count_source,
-                ..wav
+                peak_live_buffer_bytes: wav.peak_live_buffer_bytes,
             })
         })();
         snapshot_result(self.snapshots.checkpoint())?;
@@ -330,6 +350,15 @@ fn decode_error(error: unity_rs_core::Error) -> AppError {
         }
         unity_rs_core::Error::Unsupported(message) => unsupported(message),
         unity_rs_core::Error::InvalidData(message) => candidate(message),
+    }
+}
+fn canonical_error(error: AudioError) -> AppError {
+    match error {
+        AudioError::Malformed(message) => candidate(message),
+        AudioError::Limit(message) => unsupported(message),
+        AudioError::Io(error) => {
+            AppError::unity(UnityErrorKind::Io, format!("WAV destination: {error}"))
+        }
     }
 }
 
@@ -985,109 +1014,6 @@ fn load_exact_asset(
     Ok(asset)
 }
 
-struct BoundedWavSink<'a> {
-    output: &'a mut dyn Write,
-    maximum: u64,
-    written: u64,
-    prefix: [u8; 44],
-    prefix_len: usize,
-    peak_live_buffer_bytes: usize,
-    hasher: Sha256,
-}
-
-impl<'a> BoundedWavSink<'a> {
-    fn new(output: &'a mut dyn Write, maximum: u64) -> Self {
-        Self {
-            output,
-            maximum,
-            written: 0,
-            prefix: [0; 44],
-            prefix_len: 0,
-            peak_live_buffer_bytes: 44,
-            hasher: Sha256::new(),
-        }
-    }
-    fn finish(self, reference: &AudioAssetRef) -> Result<DecodedAudioReceipt, AppError> {
-        if self.prefix_len < 44 {
-            return Err(candidate("decoded WAV header is truncated"));
-        }
-        let bytes = &self.prefix;
-        if &bytes[0..4] != b"RIFF"
-            || &bytes[8..12] != b"WAVE"
-            || &bytes[12..16] != b"fmt "
-            || &bytes[36..40] != b"data"
-        {
-            return Err(candidate("decoded WAV is not canonical PCM RIFF"));
-        }
-        let u16_at =
-            |start| u16::from_le_bytes(bytes[start..start + 2].try_into().expect("two bytes"));
-        let u32_at =
-            |start| u32::from_le_bytes(bytes[start..start + 4].try_into().expect("four bytes"));
-        if u32_at(16) != 16 || u16_at(20) != 1 {
-            return Err(candidate("decoded WAV format is unsupported"));
-        }
-        let channels = u16_at(22);
-        let sample_rate = u32_at(24);
-        let byte_rate = u32_at(28);
-        let block_align = u16_at(32);
-        let bits_per_sample = u16_at(34);
-        let data_bytes = u64::from(u32_at(40));
-        if channels == 0
-            || sample_rate == 0
-            || !matches!(bits_per_sample, 8 | 16 | 24 | 32)
-            || block_align == 0
-            || u64::from(block_align) != u64::from(channels) * u64::from(bits_per_sample / 8)
-            || u64::from(byte_rate) != u64::from(sample_rate) * u64::from(block_align)
-            || data_bytes == 0
-            || data_bytes % u64::from(block_align) != 0
-            || self.written != 44 + data_bytes
-            || self.written != 8 + u64::from(u32_at(4))
-        {
-            return Err(candidate("decoded WAV lengths or PCM layout are invalid"));
-        }
-        if channels != reference.metadata.channels
-            || sample_rate != reference.metadata.sample_rate
-            || bits_per_sample != reference.metadata.bits_per_sample
-        {
-            return Err(candidate("decoded WAV properties disagree with TypeTree"));
-        }
-        Ok(DecodedAudioReceipt {
-            wav_bytes: self.written,
-            wav_sha256: hex::encode(self.hasher.finalize()),
-            channels,
-            sample_rate,
-            bits_per_sample,
-            frame_count: data_bytes / u64::from(block_align),
-            frame_count_source: FrameCountSource::ValidatedDecodedWav,
-            peak_live_buffer_bytes: self.peak_live_buffer_bytes,
-        })
-    }
-}
-
-impl Write for BoundedWavSink<'_> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let new_total = self
-            .written
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| std::io::Error::other("WAV byte count overflow"))?;
-        if new_total > self.maximum {
-            return Err(std::io::Error::other("WAV hard limit exceeded"));
-        }
-        self.peak_live_buffer_bytes = self.peak_live_buffer_bytes.max(44 + bytes.len());
-        self.output.write_all(bytes)?;
-        let prefix_copy = (44 - self.prefix_len).min(bytes.len());
-        self.prefix[self.prefix_len..self.prefix_len + prefix_copy]
-            .copy_from_slice(&bytes[..prefix_copy]);
-        self.prefix_len += prefix_copy;
-        self.hasher.update(bytes);
-        self.written = new_total;
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.output.flush()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnityFailureKind {
     CandidateDecode,
@@ -1451,6 +1377,13 @@ mod tests {
     fn fixture_session(
         layout: PayloadLayout,
     ) -> (UnitySession, tempfile::TempDir, tempfile::TempDir) {
+        fixture_session_with_wav(layout, fixture_wav())
+    }
+
+    fn fixture_session_with_wav(
+        layout: PayloadLayout,
+        wav: Vec<u8>,
+    ) -> (UnitySession, tempfile::TempDir, tempfile::TempDir) {
         use crate::{
             config::InputEntry, hash::sha256_bytes, inventory::VerifiedInputFile,
             paths::ValidatedAppPath,
@@ -1474,7 +1407,6 @@ mod tests {
         let snapshots = approved
             .snapshot_set_shared(&scratch.path().canonicalize().unwrap())
             .unwrap();
-        let wav = fixture_wav();
         const CAB: &str = "0123456789abcdef0123456789abcdef";
         let source = match layout {
             PayloadLayout::Inline => "".to_owned(),
@@ -1582,6 +1514,23 @@ mod tests {
             assert_eq!(later, wav);
             assert_eq!(session.metrics().bundle_opens, 1);
         }
+    }
+
+    #[test]
+    fn existing_wave_with_ancillary_chunk_streams_as_canonical_pcm() {
+        let mut source = fixture_wav();
+        source.splice(36..36, [b'J', b'U', b'N', b'K', 4, 0, 0, 0, 9, 8, 7, 6]);
+        source[4..8].copy_from_slice(&52_u32.to_le_bytes());
+        let (mut session, _app, _scratch) =
+            fixture_session_with_wav(PayloadLayout::External, source);
+        let reference = session.audio_refs().unwrap().remove(0);
+        let mut output = Vec::new();
+        let receipt = session
+            .stream_audio(&reference, &mut output, &AudioLimits::default())
+            .unwrap();
+        assert_eq!(output, fixture_wav());
+        assert_eq!(receipt.wav_bytes, output.len() as u64);
+        assert_eq!(receipt.frame_count, 1);
     }
 
     fn fixture_bundle(blocks: &[(u32, u16, Vec<u8>)], entries: &[(u64, u64, &str)]) -> Vec<u8> {
@@ -1906,14 +1855,6 @@ mod tests {
         assert!(
             validate_frame_count(PredecodeFrameCount::ValidatedPayloadHeader(124), 123).is_err()
         );
-    }
-
-    #[test]
-    fn bounded_sink_accounts_for_the_live_decoder_chunk_and_header() {
-        let mut output = Vec::new();
-        let mut sink = BoundedWavSink::new(&mut output, 2000);
-        sink.write_all(&vec![0; 1000]).unwrap();
-        assert_eq!(sink.peak_live_buffer_bytes, 1044);
     }
 
     #[test]

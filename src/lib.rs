@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Guarded CLI foundation for a locally authorized voice dataset build.
 
+pub mod audio;
 pub mod cli;
 pub mod config;
 pub mod error;
