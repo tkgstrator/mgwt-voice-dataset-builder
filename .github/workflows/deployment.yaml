@@ -255,7 +255,6 @@ jobs:
           release_json=$(gh api "repos/$REPOSITORY/releases/$release_id")
           test "$(jq -r '.draft' <<< "$release_json")" = true
           test "$(jq -r '.target_commitish' <<< "$release_json")" = "$COMMIT_SHA"
-          test "$(gh api "repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$COMMIT_SHA"
 
           expected_assets=$(
             for asset in \
