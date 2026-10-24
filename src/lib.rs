@@ -2,7 +2,10 @@
 //! Guarded CLI foundation for a locally authorized voice dataset build.
 
 pub mod cli;
+pub mod config;
 pub mod error;
+pub mod hash;
+pub mod inventory;
 pub mod paths;
 
 use cli::{Cli, Command};
@@ -18,7 +21,16 @@ pub enum RunOutcome {
 /// Validate command paths before handing work to later pipeline phases.
 pub fn run(cli: Cli) -> Result<RunOutcome, AppError> {
     match cli.command {
-        Command::Inspect { app, output } | Command::Build { app, output } => {
+        Command::Inspect { app, output } => {
+            validate_separation(&app, &output)?;
+            let app = ValidatedAppPath::new(&app)?;
+            let output = ValidatedOutputPath::new(&output, &app)?;
+            let approval = config::checked_in_approval()?;
+            let inspection = inventory::inspect_entries(&app, &approval.manifest.entries())?;
+            inventory::write_inspection_reports(&output, &inspection)?;
+            Ok(RunOutcome::Complete)
+        }
+        Command::Build { app, output } => {
             validate_separation(&app, &output)?;
             let app = ValidatedAppPath::new(&app)?;
             let _output = ValidatedOutputPath::new(&output, &app)?;

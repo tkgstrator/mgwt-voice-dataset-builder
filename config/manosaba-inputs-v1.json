@@ -1,0 +1,390 @@
+{
+  "app_identity": {
+    "app_info_company": "Re,AER",
+    "app_info_product": "manosaba",
+    "bundle_identifier": "com.manosaba.game",
+    "bundle_version": "1",
+    "short_version": "1.1.2",
+    "unity_build_number": "170d2541580d"
+  },
+  "approval_state": "approved",
+  "bundles": [
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter01_advbad_assets_all.bundle",
+      "sha256": "e783cedf319be3dbc9b8c70304fde94be5e1dc4aff6dd0832ba5c6a7c2f597a7",
+      "size": 266213594
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter01_trial_assets_all.bundle",
+      "sha256": "bec6c60fd9203e026ddf89e56f66c0c4d1aac76de12ddc4bf41c88090be76c11",
+      "size": 331096696
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter02_advbad_assets_all.bundle",
+      "sha256": "7a3ef7ff44d705e616e941737ac4f6738454d44739f7c6f2a27aa2f33a30ebd1",
+      "size": 216016255
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter02_trial_assets_all.bundle",
+      "sha256": "417717abbb50d69c8a708dee54022cefadec2a742834a249443861e30d78d86d",
+      "size": 323738740
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter03_advbad_assets_all.bundle",
+      "sha256": "f6c0708e92de10577f6d99e7fb46d81f567c3d535b44a0872050e9ebe82ada1f",
+      "size": 160311994
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter03_trial_assets_all.bundle",
+      "sha256": "84ccd2d1b9b9967e22b70a970990f7c67e4dcc6061f514a8d77e49b544a8dd71",
+      "size": 287764951
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter04_advbad_assets_all.bundle",
+      "sha256": "3ed38863169ab25fe2625b436da26a8b2b7181d54b07bcced3eaead6677b6f3f",
+      "size": 79366557
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter04_trial_assets_all.bundle",
+      "sha256": "9752c9d0c014b1fcc6fb535dcc5d9432e8d3713eefbe0f105b17ccfbecbb0c70",
+      "size": 188989356
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter05_advbad_assets_all.bundle",
+      "sha256": "703d28a20a0a45c968d7eb70c5ca960ecaeccb9223445036a0759b2e4d8e1732",
+      "size": 161786537
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act01_chapter05_trial_assets_all.bundle",
+      "sha256": "0b3198a91241e78fb47d44845d79ac5f32f10d23a7e80f5ed86b71c7327eee4e",
+      "size": 245298279
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter01_advbad_assets_all.bundle",
+      "sha256": "8f3ae6eae3c3b3e0cd60900f3adabf0f968206f44bf762f6fd207c5e91e851f4",
+      "size": 205743548
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter01_trial_assets_all.bundle",
+      "sha256": "af7949887c7bc9688e67d743b221a117dbe63d96bbf1e60f0b34816cfe8139a6",
+      "size": 326044390
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter02_advbad_assets_all.bundle",
+      "sha256": "bb3937e3a8f2d7ac32a6199b2f67eeb276416bdeae1aa46c5c8bab2594f1dc9a",
+      "size": 131609070
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter02_trial_assets_all.bundle",
+      "sha256": "5430cff3e1a8a5fdedf3824e63020d29ee87b7123e27cad46ea529fb1ce484d0",
+      "size": 240507103
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter03_advbad_assets_all.bundle",
+      "sha256": "68123718c10b33e95a5daa175b8d76d7f4682aa72d4c7938ac6303cf2bd0598d",
+      "size": 97492288
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter03_trial_assets_all.bundle",
+      "sha256": "630b5e832a49c0343b32c238f66028297c1b3471ba258ed3004d2a371a0e7d2e",
+      "size": 259334539
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter04_advbad_assets_all.bundle",
+      "sha256": "d3345b2d8574e4d9e6f59910e20e08a8e0ac5cf1e60ef671c0b5c2ce188b14a8",
+      "size": 135070016
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter04_trial_assets_all.bundle",
+      "sha256": "f207b733532967248f353a0672fb7b4cf1d7c5ea04d89541e6df7211e5de9b57",
+      "size": 207849851
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter05_advbad_assets_all.bundle",
+      "sha256": "4e65c29b0357f82313378d2e2ba5d66cc47f481f19e75ad1b011a82039aba3f1",
+      "size": 84604103
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter05_trial_assets_all.bundle",
+      "sha256": "2e7913ded6a8a412e1ff2f797a8cd12d5e6185ebda30991a52c418c27189d501",
+      "size": 385878259
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-act02_chapter06_trial_assets_all.bundle",
+      "sha256": "61e84db4b5ef37cf5b4e2ceb494ae5368393419173d421d73d802b9d62edc092",
+      "size": 215171785
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad01_assets_all.bundle",
+      "sha256": "e0800dd54d94b293df71f97741241ad0bcdf833828662fa71f17df2a9c327dca",
+      "size": 4857226
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad02_assets_all.bundle",
+      "sha256": "ce7c3e146fb7db6cb45c6bf134cb6472b6ae1da48d13a981ce74acfcfb841d6a",
+      "size": 1778624
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad03_assets_all.bundle",
+      "sha256": "4ce60672ee52a4b4a702f717eeb9ed89fd5eeaaac58f68ce450c80ceae83a6e0",
+      "size": 1873136
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad04_assets_all.bundle",
+      "sha256": "8238cc0c9bad095d8157ddfa43e742b413bcade33d7c83411f78e27f8f1bd68d",
+      "size": 7178302
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad05_assets_all.bundle",
+      "sha256": "6667dacc1f8e3e42e5caf6577d6b5cd19470a3c7243591d8d506434bd6574f53",
+      "size": 9866715
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad06_assets_all.bundle",
+      "sha256": "f3bbd86310e73bdd2d5c5291e08d30dfd077a72f8c2d55ca04148e361ab30d5a",
+      "size": 3078065
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad07_assets_all.bundle",
+      "sha256": "4ca9290ce0bea188d692d7981115f630b330136702e49d08965f3eceb3374ca2",
+      "size": 2175035
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad08_assets_all.bundle",
+      "sha256": "75d4cd157769fc79ef15387ef5a02818ffdc2e04e7740716973ff7bddf8d2af7",
+      "size": 2924409
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad09_assets_all.bundle",
+      "sha256": "5aaff2bf5d6fbdf40fc7a9323bec311e6cf1a7e2f644ebf9d9148837936487c1",
+      "size": 2535228
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad10_assets_all.bundle",
+      "sha256": "d0b21298ca3c7b91717d05d533b23a8272dea7a324ecfcb06e5c3e20cfb477e9",
+      "size": 1091511
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad11_assets_all.bundle",
+      "sha256": "45fd64be380475642b1ccde8b24192eaea4bc9c20d0454740f8b83b415c84e04",
+      "size": 541935
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad12_assets_all.bundle",
+      "sha256": "c8ad28e2fb2e4037978304865be0c270f14bad56c4224f19f05de9bf299cdd0f",
+      "size": 453749
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commonbad13_assets_all.bundle",
+      "sha256": "a0725273f285a831cacac5523c165f8b51befae947834daf7ba344a0df2dc9bd",
+      "size": 1661953
+    },
+    {
+      "kind": "voice",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/general-voice-commontrial_assets_all.bundle",
+      "sha256": "96983aa133061726c05b3149d549a2dbfd89ee349b1593f365fc1c46f9fe804e",
+      "size": 3184299
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter01_advbad.bundle",
+      "sha256": "2f43f1e9a3934b06496ddba73ed854171f46da6fa81e7b1881177c9da98f8c70",
+      "size": 688370
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter01_trial.bundle",
+      "sha256": "e02d08e24bbd102ed733f423c671e4ca3af8ca84b6a3a35f3ab00d1fd8b9589f",
+      "size": 654560
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter02_advbad.bundle",
+      "sha256": "26d4f602e83d8aefbc6b96d0929e924fb0fd04c109598092aa3b59d3ea512dd1",
+      "size": 455253
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter02_trial.bundle",
+      "sha256": "12551b3246cf400a65345be0ec704b68894da9abe8eb1951c0e579fc5b1d0962",
+      "size": 691589
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter03_advbad.bundle",
+      "sha256": "394a890620d9cde10527ed296dcc3be8bf294de4ed792b914bd6ab2dc1c16a9f",
+      "size": 341193
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter03_trial.bundle",
+      "sha256": "d8965782ce17117e88682e8c09bf07d6391cf17e667e63a0e15d1c887b1e4d9a",
+      "size": 594727
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter04_advbad.bundle",
+      "sha256": "c889aa7a51b94614c865c38701e84a4b2eecef6bca1f07f390025238468c6b56",
+      "size": 189216
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter04_trial.bundle",
+      "sha256": "0e11893df27a4ecf33c5e75d91480a36f33117c5b36884ffe13f0011380e8904",
+      "size": 403107
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter05_advbad.bundle",
+      "sha256": "9d642fa951ea417b90b75bcbb9b4ca82081ea884361750d1be5fbace175ba3bd",
+      "size": 280831
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act01_chapter05_trial.bundle",
+      "sha256": "cde5955f2f4307d680622f0016a5c5bb23ccfb92910510b3debaba28bccce742",
+      "size": 468062
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter01_advbad.bundle",
+      "sha256": "9845e68cb17d3fff28dba01c029b34a168abb2132b08bf86445c7f2f4b6a4257",
+      "size": 488061
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter01_trial.bundle",
+      "sha256": "1e8687f3dd8f0f385292a7b00110b8ccdce1ab44a1621307849ecdc555e07f99",
+      "size": 651130
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter02_advbad.bundle",
+      "sha256": "2b07a82d1b5f992b0fb309f484ee4320a9e6d5ffedabb6776cbd58d9657a0020",
+      "size": 331452
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter02_trial.bundle",
+      "sha256": "0599e085970d594d92eb056139a3211941e29c22bbfa3586cbaf2f72f9982f6c",
+      "size": 569020
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter03_advbad.bundle",
+      "sha256": "51b30f9dbed60eb1e9e45ffd22dbe442ff56985f1fef07e78d7b50e535bf3d3b",
+      "size": 269362
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter03_trial.bundle",
+      "sha256": "881eba3b2d072326bba6a0a0cd499753c802e89edb1b2a9dd5088ef1f05d77ba",
+      "size": 567619
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter04_advbad.bundle",
+      "sha256": "07bf3277dc49d622f58771744bcb6db7200f3de210b1b1cdab5cf5c604538506",
+      "size": 366331
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter04_trial.bundle",
+      "sha256": "584795379e43f4fd32f58a022b78ff005aa0ba8bbd4a4362ff5388d1aa69e35e",
+      "size": 444337
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter05_advbad.bundle",
+      "sha256": "9b02ecae5fb6668db36cdb4b5402b70a3bc685edfbc6d27f497f4596d3f94a90",
+      "size": 243024
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter05_trial.bundle",
+      "sha256": "3ac4a8546c0ee3ded40ddbe92e13dfe29a4b6554261112d4af3cc893bbd29ced",
+      "size": 949290
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-act02_chapter06_trial.bundle",
+      "sha256": "30f246d1dca06728951f737903862959d4171ca18fda5b2fc4fffd3ac15f0498",
+      "size": 416238
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-common.bundle",
+      "sha256": "442908b67b5e24779a5930204e99ae5895305919bfe8b7b1fafcacdd0592faa0",
+      "size": 119607
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-debug.bundle",
+      "sha256": "eb00be899b7c21a2ef7d8f7e08838154f107473166ecbb9a4af073962e3e08e9",
+      "size": 254572
+    },
+    {
+      "kind": "script",
+      "relative_path": "Contents/Resources/Data/StreamingAssets/aa/StandaloneOSX/naninovel-scripts_assets_naninovelscripts-system.bundle",
+      "sha256": "2190fd3d7a39c924cb16c3b399890e84356909371d8d9f115a78c7446364a2db",
+      "size": 98583
+    }
+  ],
+  "identity_files": [
+    {
+      "relative_path": "Contents/Info.plist",
+      "sha256": "d1dfc5e53df50f84193b789e7dd1901d3c692f1ccc6e4ae8bbbb0ea5e2ceb207",
+      "size": 1478
+    },
+    {
+      "relative_path": "Contents/Resources/Data/app.info",
+      "sha256": "cc50f407fe7bd702c4566835dbad290067443241a3b09e618ccf05f967599393",
+      "size": 15
+    },
+    {
+      "relative_path": "Contents/Resources/Data/globalgamemanagers",
+      "sha256": "13101d22af030cd2a4b31b03947f9a8e90ef4f01666eeadc7e207c43fe01f758",
+      "size": 261540
+    }
+  ],
+  "resources": [],
+  "schema_version": "manosaba-inputs-v1-portable",
+  "script_bundle_count": 24,
+  "total_consumed_bytes": 4603886665,
+  "unity_version": "6000.0.48f1",
+  "voice_bundle_count": 35
+}

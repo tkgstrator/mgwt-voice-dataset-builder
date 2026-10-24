@@ -1,0 +1,10 @@
+{
+  "former_candidate_sha256": "e8112ff95dd504fa9819316d4814716291d7fc14c7b63d53d7a351b98e7aec2f",
+  "former_full_input_fingerprint": "fe209715f41b88d7b1c54c76b22aaa46819d5f1110effb02fa2677fb48b5b1c6",
+  "former_manifest_sha256": "b6fc6867ae2d32c59783c83a7fcd34dbdd7b660d855b4bbc432c5e1729a17e61",
+  "former_speakers_sha256": "3279b5c7a207edc55e95a8911b34b3a25ed5d54ee6789c5ef4e008dd926c16d1",
+  "portable_manifest_sha256": "eabaaa87c1d1ed5d477b0660f0d6c978b5ad822b79e924c052958587ff2d0039",
+  "portable_speakers_sha256": "85555b40179ffb8e23b62c4e5e45b8f7c95af243051476bf978216e4532e29e7",
+  "schema_version": "manosaba-config-migration-v1",
+  "speaker_evidence_sha256": "b1d37d048c911c2564188725101c01d84ef95b7220f7fbb650028fd5d1452427"
+}

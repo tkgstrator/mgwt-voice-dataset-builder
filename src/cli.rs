@@ -15,7 +15,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Inspect an authorized app and write candidate metadata.
+    /// Inspect approved consumed inputs and write candidate inventory and diagnostics.
     Inspect {
         #[arg(long)]
         app: PathBuf,

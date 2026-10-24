@@ -1,0 +1,195 @@
+{
+  "approval_state": "approved",
+  "candidate_schema_version": 1,
+  "counts": {
+    "bundle_count": 24,
+    "candidate_count": 34070,
+    "candidate_rejection_count": 3308,
+    "command_count": 112486,
+    "object_count": 440,
+    "parsed_reference_count": 30762,
+    "reference_count": 304789,
+    "speaker_evidence_count": 33557,
+    "text_entry_count": 34838
+  },
+  "evidence_canonicalization": "sorted-structural-records-json-ascii-compact-v1",
+  "grammar_revision": "manosaba-speaker-grammar-v1",
+  "input_manifest_identity": {
+    "app_identity": {
+      "app_info_company": "Re,AER",
+      "app_info_product": "manosaba",
+      "bundle_identifier": "com.manosaba.game",
+      "bundle_version": "1",
+      "short_version": "1.1.2",
+      "unity_build_number": "170d2541580d"
+    },
+    "unity_version": "6000.0.48f1"
+  },
+  "input_manifest_sha256": "eabaaa87c1d1ed5d477b0660f0d6c978b5ad822b79e924c052958587ff2d0039",
+  "rejection_reasons": {
+    "invalid_voice_id": 403,
+    "non_lexical_transcription": 458,
+    "unsupported_asset_shape": 2447
+  },
+  "schema_version": "manosaba-speakers-v1-portable",
+  "speaker_ids": [
+    "Alisa",
+    "AnAn",
+    "BigWitch",
+    "Coco",
+    "Ema",
+    "EmaFake",
+    "Girl",
+    "Hanna",
+    "Hiro",
+    "Jailer",
+    "Leia",
+    "Margo",
+    "Meruru",
+    "Miria",
+    "Nanoka",
+    "Narrative",
+    "Noah",
+    "Rabbit",
+    "Sherry",
+    "StrayNarehate",
+    "Unknown",
+    "Warden",
+    "WitchCandidate1",
+    "WitchCandidate2",
+    "WitchCandidate3",
+    "Yuki"
+  ],
+  "speakers": [
+    {
+      "evidence_count": 1173,
+      "evidence_sha256": "3929ff037ba31cbd3cb850fd4043aedd218927efe5b1477aed16aa63c5f8b700",
+      "id": "Alisa"
+    },
+    {
+      "evidence_count": 720,
+      "evidence_sha256": "b1af847e24677e1a36a0b3491ca3722f8a7f29f89a038885ab9c187295e68e54",
+      "id": "AnAn"
+    },
+    {
+      "evidence_count": 9,
+      "evidence_sha256": "4ede0add4e6b0c20480255517b0f0f16b1e1dc6ce2388ae954d75544451d49e1",
+      "id": "BigWitch"
+    },
+    {
+      "evidence_count": 1264,
+      "evidence_sha256": "3106f52d60772df32ee82723d9668173daebb7724b6b2a3ec8689d5b203cb9c3",
+      "id": "Coco"
+    },
+    {
+      "evidence_count": 6291,
+      "evidence_sha256": "5dd4c3637783eba6202ee37e05ca405623769b2f4d5085860b232512ef6cdb9e",
+      "id": "Ema"
+    },
+    {
+      "evidence_count": 4,
+      "evidence_sha256": "6dfb905a8de255adc6af20db099e843a4926d1b551ea8b616e5f8bc93b9a1dbf",
+      "id": "EmaFake"
+    },
+    {
+      "evidence_count": 11,
+      "evidence_sha256": "783d0074d923c50b6ef55a595d721bfedff2c8d15e094257ea7643eeafce0101",
+      "id": "Girl"
+    },
+    {
+      "evidence_count": 1130,
+      "evidence_sha256": "36068a280378642d6b59838a16e7e53731d7c0893bec179d06bfa6e9e20900bf",
+      "id": "Hanna"
+    },
+    {
+      "evidence_count": 6197,
+      "evidence_sha256": "53582ebbc6a50bd15b9b67192f20897b65b43135a7fdf15123080c71dd7d5180",
+      "id": "Hiro"
+    },
+    {
+      "evidence_count": 19,
+      "evidence_sha256": "1eb7a3728b961d835d8fe2d047731c8b443825b4090dd775e7861780c835549c",
+      "id": "Jailer"
+    },
+    {
+      "evidence_count": 1350,
+      "evidence_sha256": "088ad4e21ca4965ca1a72b9bb6018e479fc2e1d6eb39314f95073dd783ea04ae",
+      "id": "Leia"
+    },
+    {
+      "evidence_count": 1683,
+      "evidence_sha256": "a555a70e5941586f30206d5e92293a46165c53b55f23fb6034b1573bdc59d0a6",
+      "id": "Margo"
+    },
+    {
+      "evidence_count": 1109,
+      "evidence_sha256": "7790acb3d6941bfc97ee558005e082455f631068a207c59fcb2883007edb9227",
+      "id": "Meruru"
+    },
+    {
+      "evidence_count": 910,
+      "evidence_sha256": "e781e7e468d5f4224fa8db3cb784e92c12fac7730ea0f8d780216409d9f7ac1d",
+      "id": "Miria"
+    },
+    {
+      "evidence_count": 1108,
+      "evidence_sha256": "442379170e1dde14c0c53ea4a9ccd1d341bfaa9b7d3a989898e9f65f42793011",
+      "id": "Nanoka"
+    },
+    {
+      "evidence_count": 6744,
+      "evidence_sha256": "57d6ce5152d63ff3c7cc8971b362c3b880df6edf5bb738d4dda3435c3476efa7",
+      "id": "Narrative"
+    },
+    {
+      "evidence_count": 684,
+      "evidence_sha256": "0ea4c2b796ee95bafe03c64417172923c21e5a8a3904f946f8bc85fa52490cbd",
+      "id": "Noah"
+    },
+    {
+      "evidence_count": 1,
+      "evidence_sha256": "75b111de7f80bbb27589a63787d42f91a56f268ff998a0b48b3f3199cbf11fe2",
+      "id": "Rabbit"
+    },
+    {
+      "evidence_count": 1971,
+      "evidence_sha256": "d668abd50d11367d57cb5d9cb2e3ea3b818500001add6a0f668b8027fa81ed0a",
+      "id": "Sherry"
+    },
+    {
+      "evidence_count": 32,
+      "evidence_sha256": "c6d5ee789ed01781a7a6140c5fb18acfc58cd5f6beb2f0629ae9658fe629846a",
+      "id": "StrayNarehate"
+    },
+    {
+      "evidence_count": 70,
+      "evidence_sha256": "0d9fbef84de85738a55de96ee1f307213fbfa8ab8917063e8364c09e045369a7",
+      "id": "Unknown"
+    },
+    {
+      "evidence_count": 502,
+      "evidence_sha256": "ca867b5be05a64dac9995b212edd73b033ed64b8d8073016548f20c7a570cb61",
+      "id": "Warden"
+    },
+    {
+      "evidence_count": 1,
+      "evidence_sha256": "3d607865f859167553d44661b938ba4992caa473b3eace89d1254eaef53a9060",
+      "id": "WitchCandidate1"
+    },
+    {
+      "evidence_count": 1,
+      "evidence_sha256": "024ceb9095cef73b3fda7fe64d538bd336b72762025f51f04943d8d3945ddbe7",
+      "id": "WitchCandidate2"
+    },
+    {
+      "evidence_count": 1,
+      "evidence_sha256": "48801deb50caf47395fd12eaecd588cc0a0d1b9113332c9faf546ec34476ba66",
+      "id": "WitchCandidate3"
+    },
+    {
+      "evidence_count": 572,
+      "evidence_sha256": "6520c50bea174479f1802d667f576b4dee31f19918e3a1277e49248bdd6c6a8e",
+      "id": "Yuki"
+    }
+  ]
+}
