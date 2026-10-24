@@ -1,5 +1,75 @@
 use crate::unity::PayloadBinding;
+use crate::{normalize::NormalizationResult, speaker::SpeakerResolution};
 use unity_rs_core::type_tree::TypeValue;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptProvenance {
+    pub bundle_path: String,
+    pub file_index: usize,
+    pub object_index: usize,
+    pub path_id: i64,
+    pub container_path: String,
+    pub command_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedScriptReference {
+    pub candidate_id: String,
+    pub voice_id: String,
+    pub raw_author_id: Option<String>,
+    pub raw_display_text: String,
+    pub transcription: NormalizationResult,
+    pub provenance: ScriptProvenance,
+    pub script_path: String,
+    pub script_name: String,
+    pub neighbor_commands: Vec<(usize, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptReference {
+    pub parsed: ParsedScriptReference,
+    pub speaker_resolution: SpeakerResolution,
+}
+
+#[derive(Debug, Clone)]
+pub struct CandidateRejection {
+    pub candidate_id: String,
+    pub group_id: Option<String>,
+    pub terminal_stage: &'static str,
+    pub reason: &'static str,
+    pub provenance: ScriptProvenance,
+    pub blocking_group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeakerEvidenceRecord {
+    pub speaker: String,
+    pub source: &'static str,
+    pub voice_id_sha256: Option<String>,
+    pub provenance: ScriptProvenance,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptParseResult {
+    pub parsed_references: Vec<ParsedScriptReference>,
+    pub candidate_rejections: Vec<CandidateRejection>,
+    pub speaker_evidence: Vec<SpeakerEvidenceRecord>,
+    pub object_bundle_path: String,
+    pub object_file_index: usize,
+    pub object_index: usize,
+    pub object_path_id: i64,
+    pub object_container_path_sha256: String,
+    pub script_path_sha256: String,
+    pub command_count: usize,
+    pub reference_count: usize,
+    pub text_entry_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptResolutionResult {
+    pub references: Vec<ScriptReference>,
+    pub candidate_rejections: Vec<CandidateRejection>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RawScriptObject {

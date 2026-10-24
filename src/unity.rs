@@ -140,15 +140,24 @@ impl BundleSession for UnitySession {
     fn raw_script_objects(&mut self) -> Result<Vec<RawScriptObject>, AppError> {
         snapshot_result(self.snapshots.checkpoint())?;
         let mut scripts = Vec::new();
+        let mut remaining = 256 * 1024 * 1024_usize;
         for (file_index, loaded) in self.collection.serialized_files().iter().enumerate() {
             for (object_index, object) in loaded.file.objects.iter().enumerate() {
                 if object.class_id != unity_rs_core::monobehaviour::MONO_BEHAVIOUR_CLASS_ID {
                     continue;
                 }
+                let mut limits = type_tree_limits();
+                limits.maximum_materialized_bytes =
+                    limits.maximum_materialized_bytes.min(remaining);
                 let value = loaded
                     .file
-                    .read_type_tree_value_with_limits(object_index, type_tree_limits())
+                    .read_type_tree_value_with_limits(object_index, limits)
                     .map_err(core_error)?;
+                remaining = remaining
+                    .checked_sub(retained_script_value_bytes(&value)?)
+                    .ok_or_else(|| {
+                        approved_input("aggregate retained script values exceed 256 MiB")
+                    })?;
                 let metadata = self.collection.object_metadata(file_index, object.path_id);
                 scripts.push(RawScriptObject {
                     bundle_path: self.bundle_path.clone(),
@@ -161,7 +170,14 @@ impl BundleSession for UnitySession {
                 });
             }
         }
-        scripts.sort_by(|a, b| (&a.bundle_path, a.path_id).cmp(&(&b.bundle_path, b.path_id)));
+        scripts.sort_by(|a, b| {
+            (&a.bundle_path, a.file_index, a.object_index, a.path_id).cmp(&(
+                &b.bundle_path,
+                b.file_index,
+                b.object_index,
+                b.path_id,
+            ))
+        });
         snapshot_result(self.snapshots.checkpoint())?;
         Ok(scripts)
     }
@@ -184,7 +200,14 @@ impl BundleSession for UnitySession {
                 }
             }
         }
-        refs.sort_by(|a, b| (&a.bundle_path, a.path_id).cmp(&(&b.bundle_path, b.path_id)));
+        refs.sort_by(|a, b| {
+            (&a.bundle_path, a.file_index, a.object_index, a.path_id).cmp(&(
+                &b.bundle_path,
+                b.file_index,
+                b.object_index,
+                b.path_id,
+            ))
+        });
         snapshot_result(self.snapshots.checkpoint())?;
         self.cached_audio_refs = Some(refs.clone());
         Ok(refs)
@@ -485,6 +508,44 @@ fn type_tree_limits() -> TypeTreeReadLimits {
         maximum_materialized_bytes: 16 * 1024 * 1024,
         ..TypeTreeReadLimits::default()
     }
+}
+
+/// Count the retained heap owned by one decoded value before appending it to
+/// the bundle collection. The reader's remaining materialization budget also
+/// bounds the temporary allocation while this value is being decoded.
+fn retained_script_value_bytes(value: &TypeValue) -> Result<usize, AppError> {
+    fn add(total: usize, more: usize) -> Result<usize, AppError> {
+        total
+            .checked_add(more)
+            .ok_or_else(|| approved_input("script value size overflow"))
+    }
+    fn slots<T>(count: usize) -> Result<usize, AppError> {
+        count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| approved_input("script value capacity overflow"))
+    }
+    fn heap(value: &TypeValue) -> Result<usize, AppError> {
+        match value {
+            TypeValue::String(text) => Ok(text.capacity()),
+            TypeValue::ByteArray { bytes, .. } => Ok(bytes.capacity()),
+            TypeValue::Array(items) => items
+                .iter()
+                .try_fold(slots::<TypeValue>(items.capacity())?, |total, item| {
+                    add(total, heap(item)?)
+                }),
+            TypeValue::Object(fields) => fields
+                .iter()
+                .try_fold(slots::<TypeField>(fields.capacity())?, |total, field| {
+                    add(add(total, field.name.capacity())?, heap(&field.value)?)
+                }),
+            TypeValue::Map(entries) => entries.iter().try_fold(
+                slots::<unity_rs_core::type_tree::TypeMapEntry>(entries.capacity())?,
+                |total, entry| add(add(total, heap(&entry.key)?)?, heap(&entry.value)?),
+            ),
+            _ => Ok(0),
+        }
+    }
+    add(std::mem::size_of::<TypeValue>(), heap(value)?)
 }
 
 fn fields(value: &TypeValue) -> Result<&[TypeField], AppError> {
@@ -1853,5 +1914,13 @@ mod tests {
         let mut sink = BoundedWavSink::new(&mut output, 2000);
         sink.write_all(&vec![0; 1000]).unwrap();
         assert_eq!(sink.peak_live_buffer_bytes, 1044);
+    }
+
+    #[test]
+    fn retained_script_value_accounts_for_nested_string_and_vector_capacity() {
+        let value = TypeValue::Array(vec![TypeValue::String("sample".to_owned())]);
+        assert!(
+            retained_script_value_bytes(&value).unwrap() >= std::mem::size_of::<TypeValue>() + 6
+        );
     }
 }

@@ -7,7 +7,10 @@ pub mod error;
 pub mod hash;
 pub mod inventory;
 pub mod model;
+pub mod naninovel;
+pub mod normalize;
 pub mod paths;
+pub mod speaker;
 pub mod unity;
 
 use cli::{Cli, Command};
