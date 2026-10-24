@@ -20,6 +20,7 @@ use unity_rs_core::{
     file_type::{FileType, HEADER_SCAN_LENGTH, detect_file_type},
     loader::{AssetCollection, AssetLoadLimits, LoadedResource, LoadedSerializedFile},
     serialized::{SerializedFile, SerializedOpenOptions, SerializedParseLimits},
+    serialized_file::SerializedFileHeader,
     simple_assets::{AudioClipAsset, SimpleAssetReadLimits, read_audio_clip_asset_by_file_index},
     source::Region,
     type_tree::{TypeField, TypeTreeReadLimits, TypeValue},
@@ -309,13 +310,6 @@ fn decode_error(error: unity_rs_core::Error) -> AppError {
     }
 }
 
-fn parse_error(error: unity_rs_core::Error) -> AppError {
-    match error {
-        unity_rs_core::Error::InvalidData(message) => approved_input(message),
-        other => core_error(other),
-    }
-}
-
 #[derive(Clone, Copy)]
 struct ParseBudgets {
     expanded_bytes: u64,
@@ -399,6 +393,17 @@ fn open_pinned_bundle_with_budgets(
         let label = format!("{bundle_path}::{}", entry.path);
         match detect_file_type(&header, entry.size).file_type {
             FileType::AssetsFile => {
+                let mut header_reader = EndianReader::new(entry_region.cursor(), Endian::Big);
+                let serialized_header =
+                    SerializedFileHeader::read(&mut header_reader).map_err(core_error)?;
+                if u64::from(serialized_header.metadata_size) > metadata_remaining {
+                    return Err(approved_input(
+                        "aggregate serialized metadata exceeds limit",
+                    ));
+                }
+                if objects_remaining == 0 {
+                    return Err(approved_input("aggregate serialized objects exceed limit"));
+                }
                 let parse_limits = SerializedParseLimits {
                     maximum_metadata_bytes: metadata_remaining,
                     maximum_objects: objects_remaining,
@@ -414,7 +419,7 @@ fn open_pinned_bundle_with_budgets(
                         ..SerializedOpenOptions::default()
                     },
                 )
-                .map_err(parse_error)?;
+                .map_err(core_error)?;
                 metadata_remaining = metadata_remaining
                     .checked_sub(u64::from(file.header.metadata_size))
                     .ok_or_else(|| approved_input("aggregate serialized metadata exceeds limit"))?;
@@ -1709,6 +1714,22 @@ mod tests {
         assert_eq!(
             metadata_error.unity_kind(),
             Some(UnityErrorKind::ApprovedInput)
+        );
+    }
+
+    #[test]
+    fn malformed_serialized_entry_is_unsupported_not_approved_input() {
+        let mut asset = fixture_asset(9999, b"x");
+        asset[20..24].copy_from_slice(&1_u32.to_be_bytes());
+        let bundle = fixture_bundle(
+            &[(asset.len() as u32, 0, asset.clone())],
+            &[(0, asset.len() as u64, "malformed.assets")],
+        );
+        let file = fixture_file(&bundle);
+        let error = open_pinned_bundle(file.path(), "fixture.bundle", &[]).unwrap_err();
+        assert_eq!(
+            error.unity_kind(),
+            Some(UnityErrorKind::UnsupportedLayoutOrCodec)
         );
     }
 

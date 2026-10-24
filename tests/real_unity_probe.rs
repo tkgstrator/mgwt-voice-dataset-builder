@@ -10,7 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    ffi::OsString,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -261,9 +262,58 @@ for path_id, baseline in shapes.items():
 print(json.dumps({'reproduced': len(shapes), 'bundle_sha256': bundle.sha256}))
 "#;
 
+#[derive(Debug)]
+struct PythonOraclePaths {
+    project: PathBuf,
+    app: PathBuf,
+    oracle: PathBuf,
+    bin: PathBuf,
+}
+
+fn required_python_paths(
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Result<PythonOraclePaths, &'static str> {
+    Ok(PythonOraclePaths {
+        project: lookup("MGWT_PYTHON_PROJECT_PATH")
+            .ok_or("MGWT_PYTHON_PROJECT_PATH")?
+            .into(),
+        app: lookup("MGWT_PYTHON_APP_PATH")
+            .ok_or("MGWT_PYTHON_APP_PATH")?
+            .into(),
+        oracle: lookup("MGWT_PYTHON_ORACLE_PATH")
+            .ok_or("MGWT_PYTHON_ORACLE_PATH")?
+            .into(),
+        bin: lookup("MGWT_PYTHON_BIN").ok_or("MGWT_PYTHON_BIN")?.into(),
+    })
+}
+
 #[test]
-#[ignore = "requires MGWT_APP_PATH and ignored local Python oracle"]
+fn python_oracle_paths_require_each_explicit_environment_value() {
+    let names = [
+        "MGWT_PYTHON_PROJECT_PATH",
+        "MGWT_PYTHON_APP_PATH",
+        "MGWT_PYTHON_ORACLE_PATH",
+        "MGWT_PYTHON_BIN",
+    ];
+    for missing in names {
+        let error = required_python_paths(|name| {
+            (name != missing).then(|| std::ffi::OsString::from("present"))
+        })
+        .unwrap_err();
+        assert_eq!(error, missing);
+    }
+    let paths = required_python_paths(|_| Some(std::ffi::OsString::from("present"))).unwrap();
+    assert_eq!(paths.project, Path::new("present"));
+    assert_eq!(paths.app, Path::new("present"));
+    assert_eq!(paths.oracle, Path::new("present"));
+    assert_eq!(paths.bin, Path::new("present"));
+}
+
+#[test]
+#[ignore = "requires MGWT_APP_PATH and four explicit MGWT_PYTHON_* paths"]
 fn approved_pair_and_pcm_compatibility_gate() {
+    let python_paths = required_python_paths(|name| std::env::var_os(name))
+        .unwrap_or_else(|name| panic!("{name} required"));
     let app_os = std::env::var_os("MGWT_APP_PATH").expect("MGWT_APP_PATH required");
     let app = ValidatedAppPath::new(Path::new(&app_os)).unwrap();
     let approval = checked_in_approval().unwrap();
@@ -280,29 +330,18 @@ fn approved_pair_and_pcm_compatibility_gate() {
     assert_eq!(scripts.metrics().bundle_opens, 1);
     drop(scripts);
 
-    let oracle_project = std::env::var_os("MGWT_PYTHON_PROJECT_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| "/Users/devonly/Developer/personal/NXCTF".into());
-    let oracle_app = std::env::var_os("MGWT_PYTHON_APP_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| oracle_project.join("Steam/manosaba.app"));
-    let oracle_path = std::env::var_os("MGWT_PYTHON_ORACLE_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| oracle_project.join("artifacts/probe-evidence.json"));
-    let oracle: Value = serde_json::from_slice(&std::fs::read(&oracle_path).unwrap()).unwrap();
+    let oracle: Value =
+        serde_json::from_slice(&std::fs::read(&python_paths.oracle).unwrap()).unwrap();
     assert_eq!(oracle["probe"]["unity_version"], "6000.0.48f1");
     assert_eq!(oracle["probe"]["observed_counts"]["script_objects"], 17);
     assert_eq!(oracle["probe"]["observed_counts"]["audio_assets"], 1_753);
     let temporary_wavs = tempfile::tempdir().unwrap();
-    let python = std::env::var_os("MGWT_PYTHON_BIN")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| oracle_project.join(".venv/bin/python"));
-    let output = Command::new(python)
+    let output = Command::new(&python_paths.bin)
         .arg("-c")
         .arg(PYTHON_REPRODUCE)
-        .arg(&oracle_project)
-        .arg(&oracle_app)
-        .arg(&oracle_path)
+        .arg(&python_paths.project)
+        .arg(&python_paths.app)
+        .arg(&python_paths.oracle)
         .arg(&voice_entry.relative_path)
         .arg(&voice_entry.sha256)
         .arg(temporary_wavs.path())
