@@ -6,7 +6,9 @@ pub mod config;
 pub mod error;
 pub mod hash;
 pub mod inventory;
+pub mod model;
 pub mod paths;
+pub mod unity;
 
 use cli::{Cli, Command};
 use error::AppError;

@@ -135,6 +135,21 @@ pub struct VerifiedInputFile {
     identity: (u64, u64, u64, i64, i64),
 }
 impl VerifiedInputFile {
+    /// Duplicate the already-verified descriptors without reopening an app path.
+    pub fn duplicate_bound(&self) -> Result<Self, AppError> {
+        Ok(Self {
+            file: File::from(
+                rustix::io::dup(&self.file)
+                    .map_err(|e| invalid(format!("duplicate verified input: {e}")))?,
+            ),
+            root: rustix::io::dup(&self.root)
+                .map_err(|e| invalid(format!("duplicate app root: {e}")))?,
+            relative_path: self.relative_path.clone(),
+            size: self.size,
+            sha256: self.sha256.clone(),
+            identity: self.identity,
+        })
+    }
     pub fn open(app: &ValidatedAppPath, expected: &InputEntry) -> Result<Self, AppError> {
         let root = rustix::io::dup(app.dir())
             .map_err(|e| invalid(format!("duplicate app descriptor: {e}")))?;
@@ -359,6 +374,24 @@ pub struct VerifiedSnapshotSet {
     reserved_bytes: u64,
 }
 impl VerifiedSnapshotSet {
+    /// Use only descriptor-backed, owned snapshot paths while retaining this set.
+    pub fn with_parser_paths<T>(
+        &self,
+        open: impl FnOnce(&Path, &[(String, std::path::PathBuf)]) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.verify_all()?;
+        let paths: Vec<_> = self
+            .resources
+            .iter()
+            .map(|resource| (resource.relative_path.clone(), resource.descriptor_path()))
+            .collect();
+        let result = open(&self.bundle.descriptor_path(), &paths);
+        self.verify_all()?;
+        result
+    }
+    pub fn checkpoint(&self) -> Result<(), AppError> {
+        self.verify_all()
+    }
     pub fn bundle(&self) -> &VerifiedSnapshot {
         &self.bundle
     }
@@ -414,6 +447,18 @@ impl<P> VerifiedBundleParserSession<P> {
     }
 }
 impl VerifiedBundleInputs {
+    /// Produce one owned snapshot set from already-bound descriptors through a shared input.
+    pub fn snapshot_set_shared(&self, scratch: &Path) -> Result<VerifiedSnapshotSet, AppError> {
+        let mut copy = Self {
+            bundle: self.bundle.duplicate_bound()?,
+            resources: self
+                .resources
+                .iter()
+                .map(VerifiedInputFile::duplicate_bound)
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        copy.snapshot_set(scratch)
+    }
     pub fn snapshot_set(&mut self, scratch: &Path) -> Result<VerifiedSnapshotSet, AppError> {
         let bundle_root =
             fs::fstat(&self.bundle.root).map_err(|e| invalid(format!("stat bundle root: {e}")))?;

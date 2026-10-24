@@ -31,8 +31,8 @@
 
 ## Review Focus
 
-- **Unity 6000.0.48f1 or TypeTree above a verified ceiling:** set `AssetLoadOptions::strict_unity_versions = true` for every load and fail with a typed compatibility error and no output rather than silently interpreting a newest-known layout; Task 3 adds the real and synthetic gates.
-- **Streamed AudioClip resources sharing simplified basenames:** read `m_Resource.m_Source` through a bounded TypeTree projection, resolve exactly one approved full path, and make only that source-bound region visible during decode; Tasks 3 and 6 add earlier-basename/later-exact collision and cleanup tests.
+- **Unity 6000.0.48f1 or TypeTree above a verified ceiling:** set `AssetLoadOptions::strict_unity_versions = true` for every load, validate only fields present in the approved layout, prove exact frame count from validated payload/WAV evidence rather than `m_Length`, and fail with a typed compatibility error and no output rather than silently interpreting a newest-known layout; Task 3 adds the real and synthetic gates.
+- **Streamed AudioClip resources sharing simplified basenames:** read `m_Resource.m_Source` through a bounded TypeTree projection, resolve an archive URI to exactly one entry of the verified owning bundle or another path to exactly one approved external resource, reject basename-only matches, and make only that source-bound region visible during decode; Tasks 3 and 6 add collisions, malformed CAB identifiers, and cleanup tests.
 - **Malformed Naninovel command exposing multiple or partly-invalid voice IDs:** emit one rejection that blocks every independently safe ID without duplicate source accounting; Task 4 pins it.
 - **Interleaved voice IDs across large bundles:** schedule decode work by bundle, open each bundle once, retain only staged paths/metadata, and finalize groups in deterministic voice-ID order; Tasks 3, 5, and 6 pin open counts and output equality.
 - **Interrupt/output-path race at atomic promotion:** before rename the final path remains absent and retained owned staging is reported; after rename success cannot be reported as failure; Task 8 pins destination-parent and signal races.
@@ -182,31 +182,49 @@
           limits: &AudioLimits,
       ) -> Result<DecodedAudioReceipt, AppError>;
   }
+
+  pub enum PredecodeFrameCount {
+      Unavailable,
+      ValidatedPayloadHeader(u64),
+  }
+
+  pub enum FrameCountSource {
+      ValidatedPayloadHeaderAndWav,
+      ValidatedDecodedWav,
+  }
   ```
 
-  `VerifiedBundleInputs` binds one verified bundle plus its possibly empty approved external-resource map. `AudioAssetRef` contains the TypeTree-derived `PayloadBinding::{Inline, External}`, metadata-completeness state, and codec/layout signature; it does not own decoded audio. `BundleSession` owns one opened verified bundle and exposes only the exact approved source-bound region for the clip being streamed. The sink enforces byte and expansion limits before allocation and supports hashing/canonicalization without a second full payload.
+  `VerifiedBundleInputs` binds one verified bundle plus its possibly empty approved external-resource map. `AudioAssetRef` contains the TypeTree-derived `PayloadBinding::{Inline, BundleResource, External}`, `PredecodeFrameCount`, metadata-completeness state, and codec/layout signature; it does not own decoded audio. `DecodedAudioReceipt` contains the exact decoded frame count and its `FrameCountSource`. `BundleSession` owns one opened verified bundle and exposes only the exact approved source-bound region for the clip being streamed. The sink enforces byte and expansion limits before allocation and supports hashing/canonicalization without a second full payload.
 
 - [ ] **Step 1: Pin the dependency and write failing adapter-contract tests**
 
-  Assert exact Cargo source revision, `AssetLoadOptions::strict_unity_versions = true` on every real adapter entry, synthetic above-ceiling rejection through that entry, wrong-bundle locator rejection, path-ID/name/container/resource declaration checks including offset/size drift, empty-source inline payloads starting at the post-resource-fields parser position, nonempty-source external payloads starting at declared offset, deterministic object/reference ordering, one open for many refs, hard-limit enforcement, and typed separation among candidate decode, approved-input, unsupported-layout/codec, I/O, and unexpected failures.
+  Assert exact Cargo source revision, `AssetLoadOptions::strict_unity_versions = true` on every real adapter entry, synthetic above-ceiling rejection through that entry, wrong-bundle locator rejection, path-ID/name/container/resource declaration checks including offset/size drift, empty-source inline payloads starting after the `m_CompressionFormat` integer that follows the resource fields, archive URIs resolving to an exact internal owning-bundle entry, other nonempty external sources starting at declared offset, deterministic object/reference ordering, one open for many refs, hard-limit enforcement, and typed separation among candidate decode, approved-input, unsupported-layout/codec, I/O, and unexpected failures. Require exactly 32 ASCII hexadecimal CAB-ID digits, compare directory ID, filename ID, and owning-bundle entry byte-for-byte without case folding or lossy normalization, and reject mismatched IDs, malformed/short/overlong IDs, internal entries from another bundle, duplicate exact entries, and cases where only a simplified basename matches. Add tests proving `m_Length * sample_rate` is never accepted as frame-count evidence, a single-subsound supported payload-header count is exact and must match decoded WAV frames, layouts without pre-decode evidence remain incomplete until WAV validation, and a payload/WAV count mismatch fails as unsupported layout/codec. Prove a multi-subsound FSB5 bank is bound to TypeTree `m_SubsoundIndex == 0` before first-subsound decode is accepted, remains `PredecodeFrameCount::Unavailable`, and requires measurement/WAV validation; reject negative/nonzero indexes and never confuse the bank's subsound count with PCM frames.
 
 - [ ] **Step 2: Add fake streamed-resource lifecycle tests**
 
-  Test an empty `m_Resource.m_Source` and require the declared-size region beginning at the bounded parser position immediately after the resource fields in the verified owning serialized-object source. Mutate the declared inline offset independently and prove it is validated against approved layout evidence but never used as the payload start. Separately simulate an earlier external resource whose simplified basename matches and a later resource whose full path exactly equals a nonempty `m_Resource.m_Source`; require the declared offset/size region there. Assert only the selected source-bound region is visible to `stream_audio`, remains readable during the call, and is released/restored after success, error, and interruption. No later clip may observe a stale closed entry.
+  Test an empty `m_Resource.m_Source` and require the declared-size region beginning at the bounded parser position immediately after the `m_CompressionFormat` integer in the verified owning serialized-object source. Mutate the declared inline offset independently and prove it is validated against approved layout evidence but never used as the payload start. Test `archive:/CAB-<id>/CAB-<id>.resource` against an owning-bundle `<bundle>::CAB-<id>.resource` entry, including CAB mismatch, wrong owner, duplicate entry, and earlier same-basename collision cases. Separately simulate an earlier external resource whose simplified basename matches and a later resource whose full path exactly equals another nonempty `m_Resource.m_Source`; require the declared offset/size region there. Assert only the selected source-bound region is visible to `stream_audio`, remains readable during the call, and is released/restored after success, error, and interruption. No later clip may observe a stale closed entry.
 
 - [ ] **Step 3: Implement the minimal `unity-rs-core` adapter**
 
-  Open and index a verified bundle once in strict-version mode. Use a bounded AudioClip TypeTree projection to read and validate path ID, name, `m_Resource.m_Source`, `m_Resource.m_Offset`, `m_Resource.m_Size`, channels, sample rate, sample count, and bit width. Cross-check path ID/name against the high-level core object. For an empty source, range-check and record the declared offset as approved-layout evidence but construct the expected region from the bounded parser position immediately after the resource fields plus declared size. For a nonempty source, resolve exactly one approved verified full path rather than the core's basename fallback and construct the expected region from declared offset/size. In both branches require source identity, start, and length to equal the core `AudioClipAsset.payload`; mark metadata complete only when the fields and codec justify exact sizing. Expose materialized script metadata and payload-free AudioClip locators, and stream one locator at a time through the pinned pure-Rust audio path. Convert dependency errors into the stable local error taxonomy without message-string matching.
+  Open and index a verified bundle once in strict-version mode. Use a bounded AudioClip TypeTree projection to read and validate path ID, name, `m_Resource.m_Source`, `m_Resource.m_Offset`, `m_Resource.m_Size`, channels, sample rate, bit width, duration, `m_SubsoundIndex`, and compression format. Cross-check path ID/name against the high-level core object. For an empty source, range-check and record the declared offset as approved-layout evidence but construct the expected region from the bounded parser position immediately after the `m_CompressionFormat` integer plus declared size. For an archive URI, parse bounded `archive:/CAB-<id>/CAB-<id>.resource`, require exactly 32 ASCII hexadecimal digits and byte-identical directory/filename IDs, and bind the exact filename without case folding or lossy normalization to exactly one internal entry under the verified owning bundle identity. For another nonempty source, resolve exactly one approved verified full relative external path. Never accept the core's basename fallback. For both nonempty forms, construct the region from declared offset/size; for Inline, use the post-compression-format start and declared size. Require every constructed region to equal `AudioClipAsset.payload` by `Region` source identity, start, and length. Because the pinned decoder selects the first FSB5 subsound, permit decode only when the TypeTree selects index `0` and reject negative/nonzero indexes as unsupported. Record `PredecodeFrameCount::ValidatedPayloadHeader` only when the payload is a supported bank proven to contain exactly one subsound with an authoritative exact frame count. A multi-subsound bank remains `Unavailable`, requires measurement decode, and must prove that the selected direct-WAV kind, source region, first-subsound header count, and decoded WAV agree for subsound `0`. On successful decode, derive exact frames from validated PCM WAV `data` bytes/block alignment and require equality with payload evidence when present. Never derive a count from `m_Length` or the FSB5 bank subsound count. Expose materialized script metadata and payload-free AudioClip locators, and stream one locator at a time through the pinned pure-Rust audio path. Convert dependency errors into the stable local error taxonomy without message-string matching.
 
 - [ ] **Step 4: Run the mandatory real compatibility probe**
 
-  Use the exact approved bounded pair and ignored evidence file. Assert:
+  Replace the exploratory first-clip/`m_Samples` assertion with a pass over all
+  1,753 locators. Use the exact approved bounded pair and ignored evidence file.
+  Assert:
 
   - script bundle parsing covers every expected object;
   - voice bundle exposes exactly 1,753 AudioClip refs;
   - all AudioClip TypeTree projections cross-check high-level path ID/name and declared resources resolve exactly;
+  - all 1,753 archive URIs resolve to one internal entry of the verified owning bundle without basename fallback, and the constructed `Region` equals the core payload identity/start/length;
+  - all observed `m_SubsoundIndex` values are compatible with the pinned decoder's selected subsound, and multi-subsound banks cannot select or count the wrong stream;
+  - each observed layout obtains exact decoded frame counts from validated payload-header or PCM-WAV evidence, never floating-point duration, and any two available sources agree;
   - every observed codec/layout signature has at least one representative streamed to a valid bounded WAV;
-  - representative WAV property/hash records match the ignored Python baseline;
+  - the three reviewed FSB5 Vorbis-to-PCM16 representatives first reproduce their ignored Python/FMOD oracle SHA-256 values, use the same approved bundle hash/path IDs as Rust, and match Rust exactly in canonical 44-byte header, byte length, channels, 48 kHz sample rate, frame count, and channel order; Rust independently proves exact payload `Region` binding;
+  - over all `N` same-index interleaved i16 samples in original channel order, maximum absolute difference is `<= 1`, `count(a != b) / N <= 5%`, `sum(abs(a-b)) / N <= 0.05`, and `sqrt(sum((a-b)^2) / N) <= 0.25`; no shifting or swapping is permitted for acceptance, and a diagnostic plus-or-minus-1,024-frame scan shifts whole frames without wrap/pad, scores RMS over the common overlap, and finds no nonzero lag with strictly lower RMS than zero;
+  - after otherwise valid WAV parsing, sample-comparator negative controls for a one-frame shift, channel swap, wrong clip, and injected two-LSB difference fail;
+  - two independent fresh Rust sessions produce identical canonical WAV SHA-256 values for every representative;
   - the voice bundle open counter is exactly one for the pass;
   - peak live decoded/canonicalizer buffering remains within the configured bound and never duplicates a full clip;
   - full approved input hashes are unchanged.
@@ -323,7 +341,7 @@
 
 - [ ] **Step 4: Implement measurement and staging passes**
 
-  Group actual decode work by approved bundle. Exact metadata clips require no measurement decode only when TypeTree fields and codec make the exact canonical size provable. Incomplete clips open their bundle once in measurement; staging opens each needed bundle once separately. Stream decoder output into a bounded canonicalizer/hash/file sink, release per-clip state before advancing, and retain only staged path/hash/properties metadata for later group finalization. Never materialize decoder output and canonical WAV simultaneously.
+  Group actual decode work by approved bundle. Exact metadata clips require no measurement decode only when a supported single-subsound payload has validated header evidence and the codec makes the exact canonical size provable; TypeTree duration and every multi-subsound bank remain incomplete. Incomplete clips open their bundle once in measurement; staging opens each needed bundle once separately. Stream decoder output into a bounded canonicalizer/hash/file sink, derive exact frames from validated PCM WAV bytes/block alignment, cross-check the selected payload header when present, release per-clip state before advancing, and retain only staged path/hash/properties metadata for later group finalization. Never materialize decoder output and canonical WAV simultaneously.
 
 - [ ] **Step 5: Implement exact disk reservation**
 
@@ -331,7 +349,7 @@
 
 - [ ] **Step 6: Run the real bounded audio probe**
 
-  Inventory codec/layout signatures across all eligible matched clips, stream at least one representative for every signature, compare ignored Python WAV hashes/properties, assert one bundle open per pass, and prove complete pre/post app inventory checkpoint equality. Any eligible signature with no successful representative fails the compatibility gate.
+  Inventory codec/layout signatures across all eligible matched clips and stream at least one representative for every signature. For the reviewed FSB5 Vorbis-to-PCM16 signature, reproduce the ignored Python oracle hashes and apply Task 3's exact header/property, zero-lag/channel-order, `1`-LSB, `5%`, `0.05`-MAE, and `0.25`-RMS comparison with negative controls; compare Rust canonical hashes exactly across two fresh Rust passes. Another signature must match exactly or stop for an explicit reviewed threshold rather than inheriting or widening this one. Assert one bundle open per pass, delete comparison WAVs, retain only aggregate/hash evidence, and prove complete pre/post app inventory checkpoint equality. Any eligible signature with no successful representative fails the compatibility gate.
 
 - [ ] **Step 7: Verify, review, and commit Task 6**
 
@@ -469,7 +487,7 @@
 
 - [ ] **Step 6: Run the full redacted Python semantic differential**
 
-  Against the ignored reviewed Python baseline, compare per-bundle script/object/AudioClip parse counts, voice-shaped candidate equations and terminal totals, normalized row identities and transcription hashes, speaker IDs, canonical WAV hashes/properties, and rejection stage/reason distributions. Parquet container bytes may differ across implementations, but Rust's two clean builds must have identical file maps. Any difference outside the explicitly mapped implementation-neutral reason taxonomy is unexplained and blocks acceptance; save only redacted aggregate/hash evidence under the ignored evidence directory and obtain review of any proposed mapping change.
+  Against the ignored reviewed Python baseline, compare per-bundle script/object/AudioClip parse counts, voice-shaped candidate equations and terminal totals, normalized row identities and transcription hashes, speaker IDs, exact WAV properties, reviewed per-signature PCM sample-equivalence metrics, and rejection stage/reason distributions. Do not require cross-decoder WAV hashes to agree. Require Rust canonical WAV hashes and complete file maps to agree exactly across the two clean Rust builds. Any metric outside its reviewed signature threshold, any new signature without an explicit gate, or any difference outside the explicitly mapped implementation-neutral reason taxonomy is unexplained and blocks acceptance; never widen a threshold automatically. Save only redacted aggregate/hash evidence under the ignored evidence directory and obtain review of any proposed mapping change.
 
 - [ ] **Step 7: Apply the final commit and push gates**
 

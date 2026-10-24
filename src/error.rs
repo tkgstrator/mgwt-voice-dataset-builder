@@ -23,6 +23,19 @@ impl ExitClass {
 pub enum AppError {
     Validation(String),
     Processing(String),
+    Unity {
+        kind: UnityErrorKind,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnityErrorKind {
+    ApprovedInput,
+    CandidateDecode,
+    UnsupportedLayoutOrCodec,
+    Io,
+    Unexpected,
 }
 
 impl AppError {
@@ -34,10 +47,29 @@ impl AppError {
         Self::Processing(message.into())
     }
 
+    pub fn unity(kind: UnityErrorKind, message: impl Into<String>) -> Self {
+        Self::Unity {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    pub const fn unity_kind(&self) -> Option<UnityErrorKind> {
+        match self {
+            Self::Unity { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
     pub const fn exit_class(&self) -> ExitClass {
         match self {
             Self::Validation(_) => ExitClass::Validation,
             Self::Processing(_) => ExitClass::Processing,
+            Self::Unity {
+                kind: UnityErrorKind::ApprovedInput,
+                ..
+            } => ExitClass::Validation,
+            Self::Unity { .. } => ExitClass::Processing,
         }
     }
 }
@@ -47,6 +79,7 @@ impl fmt::Display for AppError {
         match self {
             Self::Validation(message) => write!(f, "validation: {message}"),
             Self::Processing(message) => write!(f, "processing: {message}"),
+            Self::Unity { kind, message } => write!(f, "Unity {kind:?}: {message}"),
         }
     }
 }

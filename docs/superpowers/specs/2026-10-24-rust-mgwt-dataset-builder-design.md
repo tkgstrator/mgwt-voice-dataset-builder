@@ -75,6 +75,75 @@ read the approved manosaba structures or codec, implementation stops with
 evidence. It must not silently add a Python, .NET, native FMOD, or external CLI
 fallback.
 
+### Exact frame-count amendment
+
+The approved Unity 6000.0.48f1 AudioClip TypeTree used by the 1,753-clip
+compatibility bundle exposes `m_Length` but no integer sample/frame-count
+field. The builder therefore validates only fields actually present in that
+TypeTree and never estimates a count from floating-point duration multiplied by
+sample rate. Exact frame count must instead come from either a validated,
+supported payload header or a strictly validated decoded PCM WAV. Payload
+evidence is cross-checked against the decoded WAV when both exist. Metadata
+remains incomplete until one of those proofs succeeds.
+
+For FSB5, the pinned decoder selects the first subsound. The bounded TypeTree
+projection therefore reads `m_SubsoundIndex` and permits that decoder only when
+the clip selects index `0`. A nonzero or negative index is an unsupported
+layout until an indexed decoder is reviewed. A multi-subsound bank may use
+the pinned decoder only after the parsed index, selected direct-WAV kind, and
+data region prove that subsound `0` is selected. It never qualifies for
+pre-decode frame-count completeness or measurement skipping: the bounded
+measurement decode must validate the WAV count and its agreement with the
+selected first-subsound header. Only a bank proven to contain exactly one
+subsound may expose pre-decode header evidence. No bank-level subsound count may
+be mistaken for a PCM frame count.
+
+The alternatives considered for this amendment were: retaining a mandatory
+TypeTree sample-count field, which the approved layout cannot satisfy; deriving
+the value from `m_Length`, which is inexact and was rejected; and the chosen
+payload/WAV evidence model, which preserves an exact count without adding a
+runtime fallback. Layouts without exact pre-decode evidence use the bounded
+measurement pass already required by this design.
+
+### Cross-decoder PCM equivalence amendment
+
+The retained Python oracle decodes FSB5 Vorbis through native FMOD, while the
+pinned pure-Rust path decodes through `lewton`. For the three reviewed
+representatives, both paths use the same approved bundle hash and path IDs and
+produce identical canonical 44-byte PCM WAV headers, byte lengths, channel
+order, 48 kHz sample rate, and frame counts. The Rust path separately proves
+its exact payload `Region`. FMOD and `lewton` differ by at most one signed
+16-bit PCM LSB, a result consistent with independent lossy-decoder quantization
+semantics without claiming the precise cause. Cross-decoder canonical WAV
+SHA-256 equality is therefore not an acceptance requirement for this signature.
+
+The independent development-time compatibility gate first reproduces each
+stored Python oracle SHA-256, then compares aligned interleaved PCM samples. For
+the reviewed FSB5 Vorbis-to-PCM16 signature it requires zero frame lag, identical
+channel order, maximum absolute sample difference at most `1`, differing-sample
+ratio at most `5%`, mean absolute error at most `0.05` LSB, and RMS error at
+most `0.25` LSB. A one-frame shift, channel swap, wrong clip, or injected
+two-LSB difference must fail. The comparator retains only aggregate metrics and
+hashes and deletes temporary WAVs.
+
+Metrics use the same-index, original channel order of all `N` aligned
+interleaved signed i16 samples; the comparator never shifts or swaps samples to
+make a candidate pass. Differing ratio is `count(a != b) / N`, MAE is
+`sum(abs(a - b)) / N`, and RMS is `sqrt(sum((a - b)^2) / N)`. A diagnostic lag
+scan over plus or minus 1,024 frames may look for defects, but no nonzero lag
+may have a strictly lower RMS than zero. A lag score shifts whole interleaved
+frames without wrapping or padding and uses only their common overlap. The
+acceptance metrics remain computed at zero lag over all samples.
+Negative controls exercise this sample comparator after otherwise valid WAV
+parsing rather than failing only on unrelated source or header checks.
+
+These thresholds do not automatically apply to another codec, PCM width, or
+layout. A new signature must match exactly or receive an explicit reviewed
+threshold backed by independent evidence; the tool never widens a threshold in
+response to a failure. Separately, the Rust decoder must emit byte-identical
+canonical WAV SHA-256 values in independent clean Rust runs. Python remains a
+development oracle and is never a runtime dependency or fallback.
+
 ## Input Contract
 
 The primary commands are:
@@ -133,15 +202,21 @@ the following against the approved bounded script/voice pair:
 - 1,753 `AudioClip` locators can be enumerated from the bounded voice bundle;
 - the TypeTree view exposes and validates the required AudioClip name,
   `m_Resource.m_Source`, `m_Resource.m_Offset`, `m_Resource.m_Size`, channels,
-  sample rate, sample count, and bit width, and agrees with the core reader's
-  path ID/name/payload source identity, start, and length under the pinned
-  inline/external resolution rules;
+  sample rate, bit width, duration, `m_SubsoundIndex`, and compression format,
+  and agrees with the core reader's path ID/name/payload source identity, start,
+  and length under the pinned inline/external resolution rules;
+- every observed AudioClip layout proves an exact frame count from a validated
+  supported payload header or from the strictly validated decoded PCM WAV;
+  `m_Length * sample_rate` is never accepted as count evidence;
 - strict Unity-version mode is enabled for every load;
 - every codec/layout signature observed in the bounded voice bundle has at
   least one representative decoded to valid WAV; the later full matched-clip
   gate repeats this check for all eligible signatures;
-- decoded properties and SHA-256 values agree with an independently retained,
-  ignored Python baseline for those representatives;
+- decoded properties and canonical headers agree exactly with an independently
+  retained, ignored Python baseline, and reviewed cross-decoder PCM signatures
+  satisfy their explicit sample-equivalence thresholds and negative controls;
+- two independent clean Rust decodes produce identical canonical WAV SHA-256
+  values for every representative;
 - a processing pass opens the voice bundle exactly once, not once per clip;
 - pre/post approved input hashes are identical.
 
@@ -183,22 +258,37 @@ It performs a bounded AudioClip TypeTree read for fields not exposed by the
 high-level core asset type and cross-checks the two views.
 It retains the compressed bundle/container state only for that bundle.
 
+Audio metadata records whether an exact frame count is unavailable before
+decode or proven by a validated supported payload header. A successful decode
+receipt always records the exact PCM WAV frame count and whether it was proven
+by decoded-WAV validation alone or cross-checked against matching payload
+evidence. A mismatch between the two sources is an unsupported-layout/codec
+failure, not a value to reconcile. Floating-point `m_Length` remains validated
+layout metadata only and is never a count source.
+
 For audio, it exposes one source-bound clip payload/direct-WAV kind at a time.
 The caller streams decoded WAV data through a bounded canonicalizing/hash sink
 to owned staging before requesting the next; it does not require a second full
 WAV buffer. Payload binding has two explicit branches. An empty
 `m_Resource.m_Source` is inline: matching the pinned core, its payload starts at
-the bounded parser position immediately after the resource fields and uses the
-declared size. The declared offset is range-checked, recorded, and compared with
-the approved inline-layout evidence, but is not used as the inline payload
-start. A nonempty source is external: it is resolved to exactly one reviewed
-full relative path, and its declared offset/size must construct the same region
-in that verified resource. Both branches require equality with the core payload
-source identity, start, and length before decode. Only the selected source-bound
-region is visible during the clip, so an earlier same-basename external
-resource can never win. Resource handles are scoped to the bundle/session and
-are closed on success, candidate rejection, infrastructure error, interruption,
-and panic-safe unwind boundaries.
+the bounded parser position immediately after the `m_CompressionFormat` integer
+that follows the resource fields and uses the declared size. The declared
+offset is range-checked, recorded, and compared with the approved inline-layout
+evidence, but is not used as the inline payload start. A nonempty source has two
+explicit forms. An `archive:/CAB-<id>/CAB-<id>.resource` URI must contain
+exactly 32 ASCII hexadecimal digits per CAB identifier, with the directory and
+filename identifiers equal byte-for-byte without case folding, and resolve to
+exactly one internal entry of the verified owning bundle. Its loaded entry path
+must be that exact resource filename under the owning bundle identity, also
+compared byte-for-byte without lossy normalization. Any malformed, mismatched,
+duplicate, or basename-only match is rejected. Another
+nonempty path is an external resource and must resolve to exactly one reviewed
+full relative path. In either form, declared offset/size must construct the
+same `Region` as the core payload, including source identity, start, and length.
+Only the selected source-bound region is visible during the clip, so an earlier
+same-basename resource can never win. Resource handles are scoped to the
+bundle/session and are closed on success, candidate rejection, infrastructure
+error, interruption, and panic-safe unwind boundaries.
 
 No cache may retain decoded audio. A per-build verified-input cache may retain
 only file identities/hashes and immutable indexes. Measurement and staging may
@@ -283,6 +373,12 @@ sample rate, byte rate, block alignment, frame count, and payload length. It
 rewrites exactly one 16-byte PCM `fmt ` chunk followed by one `data` chunk,
 preserving PCM frames, channels, sample rate, and integer width. Odd payloads
 receive the required zero pad byte.
+
+The exact decoded frame count is `data` bytes divided by validated block
+alignment. For a supported payload that exposes an authoritative frame count,
+the adapter validates equality with this WAV-derived count. When the payload
+does not expose an exact count, the WAV-derived value is authoritative only
+after the complete bounded decode and RIFF/PCM validation succeed.
 
 Decoded audio that is empty, multi-sample when unsupported, non-WAV, malformed,
 or unsupported is a candidate-level rejection only when the decoder proves the
@@ -412,12 +508,14 @@ CLI product first.
 - An opt-in local real-app suite reads `MGWT_APP_PATH`; it never runs in public
   CI and writes only to run-owned temporary directories.
 - Differential real-app evidence compares approved inventory, parsed counts,
-  selected WAV hashes/properties, candidate equations, normalized rows, and
-  rejection semantics with the ignored Python baseline. Cross-language Parquet
-  and sidecar bytes are not required to match because writer implementations
-  may encode equivalent data differently. The Rust builder itself must still
-  produce byte-identical deterministic outputs across two clean runs. The
-  Python extractor is an oracle during development, not a runtime dependency.
+  selected WAV properties and reviewed sample-equivalence metrics, candidate
+  equations, normalized rows, and rejection semantics with the ignored Python
+  baseline. Cross-decoder WAV hashes, cross-language Parquet bytes, and sidecar
+  bytes are not required to match because codec and writer implementations may
+  encode equivalent results differently. The Rust builder itself must still
+  produce byte-identical canonical WAV hashes and deterministic output files
+  across two clean runs. The Python extractor is an oracle during development,
+  not a runtime dependency.
 - A bundle-open counter proves exactly one open per bundle per pass.
 - The full differential report compares per-bundle object/reference counts,
   terminal candidate totals, normalized row identity/text hashes, and rejection
