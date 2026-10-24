@@ -42,17 +42,37 @@ fn build_accepts_explicit_shard_audio_target() {
 }
 
 #[test]
-fn bundle_worker_count_defaults_to_four_and_is_bounded() {
+fn bundle_worker_count_defaults_to_available_cpus_and_accepts_positive_usize() {
     let parsed =
         Cli::try_parse_from(["mgwt", "build", "--app", "/app", "--output", "/out"]).unwrap();
     assert!(matches!(
         parsed.command,
         CliCommand::Build {
-            bundle_workers: 4,
+            bundle_workers: None,
             ..
         }
     ));
-    for invalid in ["0", "5"] {
+    for valid in ["1", "5", "32", "18446744073709551615"] {
+        let parsed = Cli::try_parse_from([
+            "mgwt",
+            "build",
+            "--app",
+            "/app",
+            "--output",
+            "/out",
+            "--bundle-workers",
+            valid,
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            CliCommand::Build {
+                bundle_workers: Some(_),
+                ..
+            }
+        ));
+    }
+    for invalid in ["0", "18446744073709551616"] {
         assert!(
             Cli::try_parse_from([
                 "mgwt",

@@ -55,7 +55,7 @@ fn case_alias_of_app_ancestor_is_rejected_by_bound_identity() {
             app,
             output,
             shard_audio_mib: 500,
-            bundle_workers: 4,
+            bundle_workers: Some(std::num::NonZeroUsize::new(4).unwrap()),
         },
     });
     assert_eq!(result.unwrap_err().exit_class(), ExitClass::Validation);

@@ -11,7 +11,7 @@ use mgwt_voice_dataset_builder::{
     },
     normalize::NormalizationResult,
     paths::ValidatedAppPath,
-    resolution::{TerminalKind, resolve, resolve_with_workers},
+    resolution::{TerminalKind, effective_bundle_workers, resolve, resolve_with_workers},
     speaker::SpeakerResolution,
     unity::{BundleSession, PayloadBinding, UnityBackend},
 };
@@ -674,6 +674,80 @@ fn independent_bundles_stage_concurrently_and_finalize_identically() {
             .collect::<Vec<_>>(),
         [1; 4]
     );
+}
+
+#[test]
+fn worker_requests_above_and_below_six_bundles_preserve_output_order() {
+    let names = ["a", "b", "c", "d", "e", "f"];
+    let voices = ["A", "B", "C", "D", "E", "F"];
+    let refs: Vec<_> = voices
+        .iter()
+        .zip(names)
+        .enumerate()
+        .map(|(i, (voice, name))| audio(voice, name, (i + 1) as i64, false))
+        .collect();
+    let scripts: Vec<_> = voices
+        .iter()
+        .zip(names)
+        .map(|(voice, name)| script(&format!("s-{name}"), voice, name, "Coco"))
+        .collect();
+    let plan = match_candidates(&scripts, &refs, &[]).unwrap();
+    let (_app, approved) = approved(&names);
+    let pairs: Vec<_> = refs.iter().zip([1, 2, 3, 4, 5, 6]).collect();
+    assert_eq!(effective_bundle_workers(&plan, 2), 2);
+    assert_eq!(effective_bundle_workers(&plan, 10), 6);
+
+    let mut expected_rows = None;
+    for (requested, expected_active) in [(2, 2), (10, 6)] {
+        let mut fake = backend(&pairs, &[]);
+        fake.stream_delay = Duration::from_millis(100);
+        let staging = tempfile::tempdir().unwrap();
+        let result = resolve_with_workers(
+            &plan,
+            &fake,
+            &approved,
+            staging.path(),
+            &AudioLimits::default(),
+            requested,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            fake.state.lock().unwrap().max_active_streams,
+            expected_active
+        );
+        let rows: Vec<_> = result
+            .rows
+            .iter()
+            .map(|row| (row.voice_ids.clone(), row.audio.wav_sha256.clone()))
+            .collect();
+        if let Some(expected) = &expected_rows {
+            assert_eq!(&rows, expected);
+        } else {
+            expected_rows = Some(rows);
+        }
+        let state = fake.state.lock().unwrap();
+        assert_eq!(state.opens, state.finishes);
+    }
+}
+
+#[test]
+fn zero_bundle_workers_are_rejected() {
+    let plan = match_candidates(&[], &[], &[]).unwrap();
+    assert_eq!(effective_bundle_workers(&plan, usize::MAX), 1);
+    let staging = tempfile::tempdir().unwrap();
+    let fake = backend(&[], &[]);
+    let error = resolve_with_workers(
+        &plan,
+        &fake,
+        &BTreeMap::new(),
+        staging.path(),
+        &AudioLimits::default(),
+        0,
+        |_, _| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("worker count"));
 }
 
 #[test]

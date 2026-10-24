@@ -426,7 +426,18 @@ where
     resolve_with_workers(plan, backend, approved, staging, limits, 1, check_disk)
 }
 
-/// Stage independent bundles concurrently, up to four sessions at a time.
+/// Count nonempty eligible voice bundles when sizing concurrent work and its disk reserve.
+pub fn effective_bundle_workers(plan: &MatchPlan, requested: usize) -> usize {
+    let eligible: BTreeSet<_> = plan
+        .pending_groups
+        .iter()
+        .flat_map(|group| &group.audio_refs)
+        .map(|audio| audio.bundle_path.as_str())
+        .collect();
+    requested.min(eligible.len()).max(1)
+}
+
+/// Stage independent bundles concurrently, up to the requested number of sessions.
 /// Candidate order within each bundle and final accounting remain deterministic.
 pub fn resolve_with_workers<B, D>(
     plan: &MatchPlan,
@@ -441,8 +452,8 @@ where
     B: UnityBackend + Sync,
     D: FnMut(u64, u64) -> Result<(), AppError> + Send,
 {
-    if !(1..=4).contains(&workers) {
-        return Err(fatal("bundle worker count must be between 1 and 4"));
+    if workers == 0 {
+        return Err(fatal("bundle worker count must be positive"));
     }
     if !staging.is_dir() {
         return Err(fatal("staging directory is missing"));
@@ -551,7 +562,7 @@ where
             reserved: 0,
         });
         let files = Mutex::new(&mut owned);
-        for batch in bundles.chunks_mut(workers) {
+        for batch in bundles.chunks_mut(effective_bundle_workers(plan, workers)) {
             let results = thread::scope(|scope| {
                 let mut handles = Vec::new();
                 for bundle in batch.iter_mut() {

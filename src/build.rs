@@ -155,10 +155,8 @@ pub fn build_app(
     shard_audio_mib: u64,
     bundle_workers: usize,
 ) -> Result<Report, AppError> {
-    if !(1..=4).contains(&bundle_workers) {
-        return Err(AppError::validation(
-            "bundle worker count must be between 1 and 4",
-        ));
+    if bundle_workers == 0 {
+        return Err(AppError::validation("bundle worker count must be positive"));
     }
     let interruption = BuildInterruption::new()?;
     let approval = crate::config::checked_in_approval()?;
@@ -185,9 +183,6 @@ pub fn build_app(
         )
         .ok_or_else(|| AppError::processing("snapshot reserve overflow"))?;
     let next_shard = shard_target.max(MAX_SINGLE_WAV);
-    let parallel_snapshot_reserve = max_snapshot
-        .checked_mul(bundle_workers as u64)
-        .ok_or_else(|| AppError::processing("parallel snapshot reserve overflow"))?;
     check_disk(output, 0, next_shard, max_snapshot)?;
     delivery::build_from_validated(
         output,
@@ -307,13 +302,20 @@ pub fn build_app(
                     prior_rejections: independent_rejections,
                 },
             )?;
+            let effective_workers = resolution::effective_bundle_workers(&plan, bundle_workers);
+            let parallel_snapshot_reserve = max_snapshot
+                .checked_mul(
+                    u64::try_from(effective_workers)
+                        .map_err(|_| AppError::processing("parallel snapshot reserve overflow"))?,
+                )
+                .ok_or_else(|| AppError::processing("parallel snapshot reserve overflow"))?;
             let resolved = resolution::resolve_with_workers(
                 &plan,
                 &reader,
                 &voice_inputs,
                 work,
                 &crate::model::AudioLimits::default(),
-                bundle_workers,
+                effective_workers,
                 |_already_staged, next_wav| {
                     interruption.check()?;
                     check_disk(output, next_wav, next_shard, parallel_snapshot_reserve)
