@@ -185,6 +185,7 @@ fn raised_bundle_limit_cannot_exceed_the_fixed_512_mib_ceiling() {
     assert_eq!(reader.maximum_bundle_bytes(), 512 * 1024 * 1024);
 }
 
+#[cfg(unix)]
 #[test]
 fn snapshot_drift_crossing_unity_entry_is_typed_approved_input() {
     use mgwt_voice_dataset_builder::{
