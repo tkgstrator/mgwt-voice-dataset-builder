@@ -401,9 +401,6 @@ fn open_pinned_bundle_with_budgets(
                         "aggregate serialized metadata exceeds limit",
                     ));
                 }
-                if objects_remaining == 0 {
-                    return Err(approved_input("aggregate serialized objects exceed limit"));
-                }
                 let parse_limits = SerializedParseLimits {
                     maximum_metadata_bytes: metadata_remaining,
                     maximum_objects: objects_remaining,
@@ -419,7 +416,15 @@ fn open_pinned_bundle_with_budgets(
                         ..SerializedOpenOptions::default()
                     },
                 )
-                .map_err(core_error)?;
+                .map_err(|error| {
+                    if objects_remaining == 0
+                        && matches!(error, unity_rs_core::Error::InvalidData(_))
+                    {
+                        approved_input("aggregate serialized objects exceed limit")
+                    } else {
+                        core_error(error)
+                    }
+                })?;
                 metadata_remaining = metadata_remaining
                     .checked_sub(u64::from(file.header.metadata_size))
                     .ok_or_else(|| approved_input("aggregate serialized metadata exceeds limit"))?;
@@ -1553,6 +1558,10 @@ mod tests {
     }
 
     fn fixture_asset(class_id: i32, object: &[u8]) -> Vec<u8> {
+        fixture_asset_with_count(class_id, object, 1)
+    }
+
+    fn fixture_asset_with_count(class_id: i32, object: &[u8], count: usize) -> Vec<u8> {
         let mut metadata = b"6000.0.48f1\0".to_vec();
         metadata.extend_from_slice(&13_i32.to_le_bytes());
         metadata.push(0);
@@ -1561,21 +1570,23 @@ mod tests {
         metadata.push(0);
         metadata.extend_from_slice(&(-1_i16).to_le_bytes());
         metadata.extend_from_slice(&[0_u8; 16]);
-        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        metadata.extend_from_slice(&i32::try_from(count).unwrap().to_le_bytes());
         while !(48 + metadata.len()).is_multiple_of(4) {
             metadata.push(0);
         }
-        metadata.extend_from_slice(&7_i64.to_le_bytes());
-        metadata.extend_from_slice(&0_i64.to_le_bytes());
-        metadata.extend_from_slice(&u32::try_from(object.len()).unwrap().to_le_bytes());
-        metadata.extend_from_slice(&0_i32.to_le_bytes());
+        for index in 0..count {
+            metadata.extend_from_slice(&i64::try_from(index + 7).unwrap().to_le_bytes());
+            metadata.extend_from_slice(&u64::try_from(index * object.len()).unwrap().to_le_bytes());
+            metadata.extend_from_slice(&u32::try_from(object.len()).unwrap().to_le_bytes());
+            metadata.extend_from_slice(&0_i32.to_le_bytes());
+        }
         for _ in 0..3 {
             metadata.extend_from_slice(&0_i32.to_le_bytes());
         }
         metadata.push(0);
         let metadata_size = u32::try_from(metadata.len()).unwrap();
         let data_offset = (48 + u64::from(metadata_size)).div_ceil(16) * 16;
-        let file_size = data_offset + object.len() as u64;
+        let file_size = data_offset + (object.len() * count) as u64;
         let mut bytes = vec![0_u8; 48];
         bytes[8..12].copy_from_slice(&22_u32.to_be_bytes());
         bytes[20..24].copy_from_slice(&metadata_size.to_be_bytes());
@@ -1583,7 +1594,9 @@ mod tests {
         bytes[32..40].copy_from_slice(&i64::try_from(data_offset).unwrap().to_be_bytes());
         bytes.extend_from_slice(&metadata);
         bytes.resize(data_offset as usize, 0);
-        bytes.extend_from_slice(object);
+        for _ in 0..count {
+            bytes.extend_from_slice(object);
+        }
         bytes
     }
 
@@ -1715,6 +1728,40 @@ mod tests {
             metadata_error.unity_kind(),
             Some(UnityErrorKind::ApprovedInput)
         );
+    }
+
+    #[test]
+    fn exact_object_cap_allows_later_empty_serialized_file_but_rejects_added_object() {
+        let at_cap = fixture_asset_with_count(9999, b"", 200_000);
+        let empty = fixture_asset_with_count(9999, b"", 0);
+        let nonempty = fixture_asset(9999, b"");
+        let mut accepted_data = at_cap.clone();
+        accepted_data.extend_from_slice(&empty);
+        let bundle = fixture_bundle(
+            &[(accepted_data.len() as u32, 0, accepted_data)],
+            &[
+                (0, at_cap.len() as u64, "at-cap.assets"),
+                (at_cap.len() as u64, empty.len() as u64, "empty.assets"),
+            ],
+        );
+        let accepted = fixture_file(&bundle);
+        let (collection, _) = open_pinned_bundle(accepted.path(), "fixture.bundle", &[]).unwrap();
+        assert_eq!(collection.serialized_files().len(), 2);
+        assert_eq!(collection.serialized_files()[0].file.objects.len(), 200_000);
+        assert!(collection.serialized_files()[1].file.objects.is_empty());
+
+        let mut rejected_data = at_cap.clone();
+        rejected_data.extend_from_slice(&nonempty);
+        let rejected_bundle = fixture_bundle(
+            &[(rejected_data.len() as u32, 0, rejected_data)],
+            &[
+                (0, at_cap.len() as u64, "at-cap.assets"),
+                (at_cap.len() as u64, nonempty.len() as u64, "extra.assets"),
+            ],
+        );
+        let rejected = fixture_file(&rejected_bundle);
+        let error = open_pinned_bundle(rejected.path(), "fixture.bundle", &[]).unwrap_err();
+        assert_eq!(error.unity_kind(), Some(UnityErrorKind::ApprovedInput));
     }
 
     #[test]

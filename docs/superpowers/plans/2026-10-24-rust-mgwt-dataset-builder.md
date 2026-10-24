@@ -232,7 +232,11 @@
   Run:
 
   ```bash
-  test -n "${MGWT_APP_PATH:-}"
+  MGWT_APP_PATH='<approved local app path>' \
+  MGWT_PYTHON_PROJECT_PATH='<ignored Python project path>' \
+  MGWT_PYTHON_APP_PATH='<ignored Python app path>' \
+  MGWT_PYTHON_ORACLE_PATH='<ignored oracle JSON path>' \
+  MGWT_PYTHON_BIN='<local Python interpreter path>' \
   cargo test --test real_unity_probe --locked -- --ignored --nocapture
   ```
 

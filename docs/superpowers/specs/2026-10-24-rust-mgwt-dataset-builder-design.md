@@ -505,8 +505,12 @@ CLI product first.
   counts, and unsafe paths without unbounded allocation or panic.
 - Integration fixtures are synthetic or generated and contain no game text or
   audio.
-- An opt-in local real-app suite reads `MGWT_APP_PATH`; it never runs in public
-  CI and writes only to run-owned temporary directories.
+- An opt-in local real-app suite reads `MGWT_APP_PATH`; the Task 3 Python-oracle
+  compatibility probe additionally requires explicit `MGWT_PYTHON_PROJECT_PATH`,
+  `MGWT_PYTHON_APP_PATH`, `MGWT_PYTHON_ORACLE_PATH`, and `MGWT_PYTHON_BIN`.
+  These paths refer to ignored local evidence and a local interpreter, never
+  tracked defaults. The suite never runs in public CI and writes only to
+  run-owned temporary directories.
 - Differential real-app evidence compares approved inventory, parsed counts,
   selected WAV properties and reviewed sample-equivalence metrics, candidate
   equations, normalized rows, and rejection semantics with the ignored Python
