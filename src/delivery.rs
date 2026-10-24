@@ -271,6 +271,14 @@ fn canonical_wav(bytes: &[u8]) -> io::Result<()> {
 }
 
 pub fn verify_dataset(root: &Path) -> io::Result<Report> {
+    verify_dataset_checked(root, || Ok(()))
+}
+
+fn verify_dataset_checked(
+    root: &Path,
+    mut check_cancel: impl FnMut() -> io::Result<()>,
+) -> io::Result<Report> {
+    check_cancel()?;
     let manifest: Manifest =
         serde_json::from_reader(File::open(root.join("metadata/manifest.json"))?).map_err(other)?;
     let report: Report =
@@ -344,6 +352,7 @@ pub fn verify_dataset(root: &Path) -> io::Result<Report> {
     let mut observed_names = BTreeSet::new();
     let mut speaker_shard_counts: BTreeMap<String, usize> = BTreeMap::new();
     for shard in &report.shards {
+        check_cancel()?;
         let parts: Vec<_> = shard.path.split('/').collect();
         if parts.len() != 4 || parts[0] != "data" || parts[1] != "ja" || !safe_speaker(parts[2]) {
             return Err(invalid("unsafe shard path"));
@@ -354,6 +363,7 @@ pub fn verify_dataset(root: &Path) -> io::Result<Report> {
     }
     let mut speaker_seen: BTreeMap<String, usize> = BTreeMap::new();
     for shard in &report.shards {
+        check_cancel()?;
         let parts: Vec<_> = shard.path.split('/').collect();
         let speaker = parts[2];
         let number = speaker_seen.entry(speaker.to_string()).or_default();
@@ -379,6 +389,7 @@ pub fn verify_dataset(root: &Path) -> io::Result<Report> {
         let mut row_count = 0;
         let mut audio_bytes = 0u64;
         for batch in builder.build().map_err(other)? {
+            check_cancel()?;
             let batch = batch.map_err(other)?;
             let audio = batch
                 .column(0)
@@ -453,22 +464,25 @@ pub fn verify_dataset(root: &Path) -> io::Result<Report> {
 
 /// Write into a private sibling directory, read back the complete dataset,
 /// recheck approved input, then publish through the bound parent without clobbering.
-pub fn build_from_validated<R, C, D>(
+pub fn build_from_validated<R, C, D, I>(
     output: &crate::paths::ValidatedOutputPath,
     target_audio_bytes: u64,
     resolve: R,
     before_promote: C,
     mut check_shard_disk: D,
+    mut check_cancel: I,
 ) -> Result<Report, crate::error::AppError>
 where
     R: FnOnce(&Path) -> Result<PreparedDataset, crate::error::AppError>,
     C: FnOnce() -> Result<(), crate::error::AppError>,
     D: FnMut(u64) -> Result<(), crate::error::AppError>,
+    I: FnMut() -> Result<(), crate::error::AppError>,
 {
     use crate::{
         error::AppError, inventory::requested_parent_matches, parquet_writer::write_shards_checked,
     };
     let processing = |error: io::Error| AppError::processing(format!("dataset delivery: {error}"));
+    check_cancel()?;
     requested_parent_matches(output)?;
     let stage = tempfile::Builder::new()
         .prefix(".mgwt-stage-")
@@ -481,20 +495,26 @@ where
     let work = stage.path().join("work");
     fs::create_dir(&work).map_err(processing)?;
     let prepared = resolve(&work)?;
+    check_cancel()?;
     if prepared.rows.is_empty() {
         return Err(AppError::processing("no accepted dataset rows"));
     }
     let shards = write_shards_checked(&prepared.rows, stage.path(), target_audio_bytes, |bytes| {
+        check_cancel().map_err(other)?;
         check_shard_disk(bytes).map_err(other)
     })
     .map_err(processing)?;
+    check_cancel()?;
     fs::remove_dir_all(&work).map_err(processing)?;
     let report = write_sidecars(stage.path(), &prepared, &shards).map_err(processing)?;
-    let verified = verify_dataset(stage.path()).map_err(processing)?;
+    check_cancel()?;
+    let verified = verify_dataset_checked(stage.path(), || check_cancel().map_err(other))
+        .map_err(processing)?;
     if verified != report {
         return Err(AppError::processing("dataset readback report mismatch"));
     }
     before_promote()?;
+    check_cancel()?;
     requested_parent_matches(output)?;
     renameat_with(
         output.parent(),
@@ -567,6 +587,7 @@ mod tests {
                 checked += 1;
                 Ok(())
             },
+            || Ok(()),
         )
         .unwrap();
         assert!(checked > 0);
@@ -592,9 +613,43 @@ mod tests {
             prepare,
             || Err(crate::error::AppError::processing("checkpoint failed")),
             |_| Ok(()),
+            || Ok(()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("checkpoint failed"));
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn injected_interrupt_after_staging_removes_owned_directory() {
+        let tmp = tempfile::tempdir_in(".").unwrap();
+        let app_path = tmp.path().join("app");
+        fs::create_dir(&app_path).unwrap();
+        let app = ValidatedAppPath::new(&app_path).unwrap();
+        let output = tmp.path().join("dataset");
+        let bound = ValidatedOutputPath::new(&output, &app).unwrap();
+        let interrupted = std::cell::Cell::new(false);
+        let error = build_from_validated(
+            &bound,
+            500 * 1024 * 1024,
+            |work| {
+                let prepared = prepare(work)?;
+                interrupted.set(true);
+                Ok(prepared)
+            },
+            || Ok(()),
+            |_| Ok(()),
+            || {
+                if interrupted.get() {
+                    Err(crate::error::AppError::processing("build interrupted"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("build interrupted"));
         assert!(!output.exists());
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }

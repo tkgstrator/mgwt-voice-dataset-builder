@@ -285,8 +285,8 @@ fn interleaved_ids_open_each_bundle_once_per_pass_and_finalize_original_order() 
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |bytes| {
-            checks.push(bytes);
+        |already, next| {
+            checks.push((already, next));
             Ok(())
         },
     )
@@ -314,7 +314,7 @@ fn interleaved_ids_open_each_bundle_once_per_pass_and_finalize_original_order() 
         [2, 2, 2]
     );
     assert_eq!(result.exact_staged_wav_bytes, 138);
-    assert!(checks.contains(&46) && checks.contains(&92) && checks.contains(&138));
+    assert!(checks.contains(&(0, 46)) && checks.contains(&(46, 46)) && checks.contains(&(92, 46)));
     assert_eq!(result.terminal_sources.len(), 6);
     assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 3);
 }
@@ -340,7 +340,7 @@ fn local_failure_falls_back_to_later_candidate_and_removes_partial_stage() {
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(result.rows.len(), 1);
@@ -371,7 +371,7 @@ fn aliases_conflicts_and_cross_id_duplicate_rules_balance_sources() {
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(result.rows.len(), 1);
@@ -395,7 +395,7 @@ fn aliases_conflicts_and_cross_id_duplicate_rules_balance_sources() {
         &approved,
         conflict_stage.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(result.rows.len(), 1); // A rejected; B still stands
@@ -419,7 +419,7 @@ fn aliases_conflicts_and_cross_id_duplicate_rules_balance_sources() {
         &approved,
         cross_stage.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert!(result.rows.is_empty());
@@ -445,7 +445,7 @@ fn all_eligible_fail_is_fatal_but_unused_bundle_nonfatal_and_infrastructure_clea
             &approved,
             staging.path(),
             &AudioLimits::default(),
-            |_| Ok(())
+            |_, _| Ok(())
         )
         .is_err()
     );
@@ -457,7 +457,7 @@ fn all_eligible_fail_is_fatal_but_unused_bundle_nonfatal_and_infrastructure_clea
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(
@@ -479,7 +479,7 @@ fn all_eligible_fail_is_fatal_but_unused_bundle_nonfatal_and_infrastructure_clea
             &approved,
             failure_stage.path(),
             &AudioLimits::default(),
-            |_| Ok(())
+            |_, _| Ok(())
         )
         .is_err()
     );
@@ -508,8 +508,8 @@ fn disk_callback_failure_after_one_clip_removes_every_owned_file() {
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |bytes| {
-            if bytes > 46 {
+        |already, next| {
+            if already + next > 46 {
                 Err(AppError::processing("disk reservation refused"))
             } else {
                 Ok(())
@@ -538,7 +538,7 @@ fn disk_check_precedes_staging_bundle_open() {
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |_| Err(AppError::processing("disk check refused")),
+        |_, _| Err(AppError::processing("disk check refused")),
     );
     assert!(result.is_err());
     assert!(fake.state.lock().unwrap().opens.is_empty());
@@ -565,7 +565,7 @@ fn decoder_receipt_hash_must_match_staged_wav_and_cleanup_on_mismatch() {
         &approved,
         staging.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     );
     assert!(result.is_err());
     assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);

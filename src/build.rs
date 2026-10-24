@@ -14,10 +14,60 @@ use crate::{
     unity::{BundleSession, UnityBackend, UnityReader},
 };
 use serde_json::{Value, json};
-use std::{cell::Cell, collections::BTreeMap};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 const SIDECAR_ALLOWANCE: u64 = 64 * 1024 * 1024;
 const SAFETY_MARGIN: u64 = 512 * 1024 * 1024;
+const MAX_SINGLE_WAV: u64 = 256 * 1024 * 1024;
+
+struct BuildInterruption {
+    raised: Arc<AtomicBool>,
+    registrations: [signal_hook::SigId; 2],
+}
+
+impl BuildInterruption {
+    fn new() -> Result<Self, AppError> {
+        let raised = Arc::new(AtomicBool::new(false));
+        let first = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&raised))
+            .map_err(|e| AppError::processing(format!("install interrupt handler: {e}")))?;
+        let second =
+            match signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&raised)) {
+                Ok(id) => id,
+                Err(e) => {
+                    signal_hook::low_level::unregister(first);
+                    return Err(AppError::processing(format!(
+                        "install termination handler: {e}"
+                    )));
+                }
+            };
+        Ok(Self {
+            raised,
+            registrations: [first, second],
+        })
+    }
+
+    fn check(&self) -> Result<(), AppError> {
+        if self.raised.load(Ordering::SeqCst) {
+            Err(AppError::processing("build interrupted"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for BuildInterruption {
+    fn drop(&mut self) {
+        for id in self.registrations {
+            signal_hook::low_level::unregister(id);
+        }
+    }
+}
 
 fn bound_bundle(
     app: &ValidatedAppPath,
@@ -36,10 +86,29 @@ fn bound_bundle(
     })
 }
 
+fn future_space_need(next_wav: u64, next_parquet: u64, snapshot: u64) -> Result<u64, AppError> {
+    next_wav
+        .checked_add(next_parquet)
+        .and_then(|n| n.checked_add(snapshot))
+        .and_then(|n| n.checked_add(SIDECAR_ALLOWANCE))
+        .and_then(|n| n.checked_add(SAFETY_MARGIN))
+        .ok_or_else(|| AppError::processing("disk reservation arithmetic overflow"))
+}
+
+fn ensure_free_space(free: u64, needed: u64) -> Result<(), AppError> {
+    if needed > free {
+        return Err(AppError::processing(format!(
+            "insufficient output disk space: need {needed} bytes, available {free} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Current free space already reflects every staged WAV and Parquet byte written so far.
 fn check_disk(
     output: &ValidatedOutputPath,
-    staged: u64,
-    parquet: u64,
+    next_wav: u64,
+    next_parquet: u64,
     snapshot: u64,
 ) -> Result<(), AppError> {
     let stat = rustix::fs::fstatvfs(output.parent())
@@ -48,18 +117,7 @@ fn check_disk(
         .f_bavail
         .checked_mul(stat.f_frsize)
         .ok_or_else(|| AppError::processing("free-space arithmetic overflow"))?;
-    let needed = staged
-        .checked_add(parquet)
-        .and_then(|n| n.checked_add(snapshot))
-        .and_then(|n| n.checked_add(SIDECAR_ALLOWANCE))
-        .and_then(|n| n.checked_add(SAFETY_MARGIN))
-        .ok_or_else(|| AppError::processing("disk reservation arithmetic overflow"))?;
-    if needed > free {
-        return Err(AppError::processing(format!(
-            "insufficient output disk space: need {needed} bytes, available {free} bytes"
-        )));
-    }
-    Ok(())
+    ensure_free_space(free, future_space_need(next_wav, next_parquet, snapshot)?)
 }
 
 fn kind_label(kind: CandidateKind) -> &'static str {
@@ -96,8 +154,10 @@ pub fn build_app(
     output: &ValidatedOutputPath,
     shard_audio_mib: u64,
 ) -> Result<Report, AppError> {
+    let interruption = BuildInterruption::new()?;
     let approval = crate::config::checked_in_approval()?;
     let pre = inventory::inventory_app(app, &approval.manifest)?;
+    interruption.check()?;
     let shard_target = shard_audio_mib
         .checked_mul(1024 * 1024)
         .filter(|n| *n > 0)
@@ -118,8 +178,8 @@ pub fn build_app(
                 .sum::<u64>(),
         )
         .ok_or_else(|| AppError::processing("snapshot reserve overflow"))?;
-    check_disk(output, 0, shard_target, max_snapshot)?;
-    let retained_audio_bytes = Cell::new(0_u64);
+    let next_shard = shard_target.max(MAX_SINGLE_WAV);
+    check_disk(output, 0, next_shard, max_snapshot)?;
     delivery::build_from_validated(
         output,
         shard_target,
@@ -133,10 +193,12 @@ pub fn build_app(
                 .iter()
                 .filter(|b| b.kind == BundleKind::Script)
             {
-                check_disk(output, 0, shard_target, bundle.size)?;
+                interruption.check()?;
+                check_disk(output, 0, next_shard, bundle.size)?;
                 let approved = bound_bundle(app, bundle)?;
                 let mut session = reader.open_bundle(&approved)?;
                 for raw in session.raw_script_objects()? {
+                    interruption.check()?;
                     parsed.push(parse_script_object(&raw)?);
                 }
                 script_bundles += 1;
@@ -211,7 +273,8 @@ pub fn build_app(
                 .iter()
                 .filter(|b| b.kind == BundleKind::Voice)
             {
-                check_disk(output, 0, shard_target, bundle.size)?;
+                interruption.check()?;
+                check_disk(output, 0, next_shard, bundle.size)?;
                 let approved = bound_bundle(app, bundle)?;
                 let mut session = reader.open_bundle(&approved)?;
                 let references = session.audio_refs()?;
@@ -237,12 +300,14 @@ pub fn build_app(
                 &voice_inputs,
                 work,
                 &crate::model::AudioLimits::default(),
-                |next_bytes| check_disk(output, next_bytes, shard_target, max_snapshot),
+                |_already_staged, next_wav| {
+                    interruption.check()?;
+                    check_disk(output, next_wav, next_shard, max_snapshot)
+                },
             )?;
             if resolved.rows.is_empty() {
                 return Err(AppError::processing("no accepted dataset rows"));
             }
-            retained_audio_bytes.set(resolved.exact_staged_wav_bytes);
             let rows = resolved
                 .rows
                 .iter()
@@ -284,19 +349,51 @@ pub fn build_app(
             })
         },
         || {
+            interruption.check()?;
             let post = inventory::inventory_app(app, &approval.manifest)?;
+            interruption.check()?;
             if post != pre {
                 return Err(AppError::validation("approved inputs changed during build"));
             }
             Ok(())
         },
-        |written_parquet| {
-            check_disk(
-                output,
-                retained_audio_bytes.get(),
-                written_parquet.saturating_add(shard_target),
-                max_snapshot,
-            )
-        },
+        |_written_audio| check_disk(output, 0, next_shard, max_snapshot),
+        || interruption.check(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_free_space_counts_only_future_writes() {
+        let next_wav = 2 * 1024 * 1024;
+        let next_shard = 500 * 1024 * 1024;
+        let snapshot = 70 * 1024 * 1024;
+        let needed = future_space_need(next_wav, next_shard, snapshot).unwrap();
+        // Earlier staged WAVs and Parquet shards have already reduced the free-space reading.
+        let already_written = 10 * 1024 * 1024 * 1024_u64;
+        assert!(already_written > needed);
+        assert!(ensure_free_space(needed, needed).is_ok());
+        assert!(ensure_free_space(needed - 1, needed).is_err());
+        assert_eq!(
+            needed,
+            next_wav + next_shard + snapshot + SIDECAR_ALLOWANCE + SAFETY_MARGIN
+        );
+    }
+
+    #[test]
+    fn injected_signal_flag_requests_cancellation() {
+        let interruption = BuildInterruption::new().unwrap();
+        assert!(interruption.check().is_ok());
+        interruption.raised.store(true, Ordering::SeqCst);
+        assert!(
+            interruption
+                .check()
+                .unwrap_err()
+                .to_string()
+                .contains("interrupted")
+        );
+    }
 }

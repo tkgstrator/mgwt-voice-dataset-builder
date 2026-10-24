@@ -109,7 +109,7 @@ fn two_approved_clips_resolve_into_owned_staging() {
         &approved_map,
         staging.path(),
         &AudioLimits::default(),
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
     .unwrap();
     assert_eq!(result.bundle_health[0].eligible_attempts, 2);

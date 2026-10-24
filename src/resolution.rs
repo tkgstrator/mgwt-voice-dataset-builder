@@ -282,8 +282,8 @@ fn reject_script(
 }
 
 /// Caller supplies an already-approved map and an existing private staging directory.
-/// The callback receives exact cumulative WAV bytes before each staging decode; it may
-/// check free space or a configured limit. All files created here are removed on error.
+/// The callback receives bytes already staged and bytes about to be written.
+/// All files created here are removed on error.
 pub fn resolve<B, D>(
     plan: &MatchPlan,
     backend: &B,
@@ -294,7 +294,7 @@ pub fn resolve<B, D>(
 ) -> Result<ResolvedDataset, AppError>
 where
     B: UnityBackend,
-    D: FnMut(u64) -> Result<(), AppError>,
+    D: FnMut(u64, u64) -> Result<(), AppError>,
 {
     if !staging.is_dir() {
         return Err(fatal("staging directory is missing"));
@@ -359,7 +359,7 @@ where
                 .take_while(|w| w.reference.bundle_path == bundle)
                 .count();
             if work[i..end].iter().any(|w| w.expected_bytes.is_none()) {
-                check_disk(0)?;
+                check_disk(0, 0)?;
                 let mut session = backend.open_bundle(&approved[&bundle])?;
                 for w in &mut work[i..end] {
                     if w.expected_bytes.is_some() {
@@ -389,7 +389,7 @@ where
                 .take_while(|w| w.reference.bundle_path == bundle)
                 .count();
             if work[i..end].iter().any(|w| !w.failed) {
-                check_disk(cumulative)?;
+                check_disk(cumulative, 0)?;
                 let mut session = backend.open_bundle(&approved[&bundle])?;
                 for w in &mut work[i..end] {
                     if w.failed {
@@ -399,7 +399,7 @@ where
                     let reserved = cumulative
                         .checked_add(expected)
                         .ok_or_else(|| fatal("staged WAV total overflow"))?;
-                    check_disk(reserved)?;
+                    check_disk(cumulative, expected)?;
                     let path = staging.join(format!("{}.wav", w.id));
                     let mut file = OpenOptions::new()
                         .write(true)
