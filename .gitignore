@@ -1,0 +1,12 @@
+.DS_Store
+target/
+.superpowers/
+*.app/
+datasets/
+dataset/
+staging/
+evidence/
+logs/
+*.log
+local/
+tmp/
