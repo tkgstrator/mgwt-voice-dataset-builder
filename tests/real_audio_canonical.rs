@@ -58,6 +58,7 @@ fn one_approved_vorbis_clip_streams_through_canonicalizer() {
         FrameCountSource::ValidatedPayloadHeaderAndWav
     );
     assert_eq!(session.metrics().bundle_opens, 1);
+    session.finish().unwrap();
     eprintln!(
         "one Vorbis clip canonicalized: bytes={} frames={} opens=1",
         receipt.wav_bytes, receipt.frame_count

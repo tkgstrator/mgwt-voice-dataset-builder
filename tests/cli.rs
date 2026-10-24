@@ -1,3 +1,5 @@
+use clap::Parser;
+use mgwt_voice_dataset_builder::cli::{Cli, Command as CliCommand};
 use std::process::Command;
 
 fn binary() -> Command {
@@ -34,9 +36,35 @@ fn error_classes_have_stable_process_codes() {
 fn build_accepts_explicit_shard_audio_target() {
     let output = binary().args(["build", "--help"]).output().unwrap();
     assert!(output.status.success());
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .contains("--shard-audio-mib")
-    );
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--shard-audio-mib"));
+    assert!(help.contains("--bundle-workers"));
+}
+
+#[test]
+fn bundle_worker_count_defaults_to_four_and_is_bounded() {
+    let parsed =
+        Cli::try_parse_from(["mgwt", "build", "--app", "/app", "--output", "/out"]).unwrap();
+    assert!(matches!(
+        parsed.command,
+        CliCommand::Build {
+            bundle_workers: 4,
+            ..
+        }
+    ));
+    for invalid in ["0", "5"] {
+        assert!(
+            Cli::try_parse_from([
+                "mgwt",
+                "build",
+                "--app",
+                "/app",
+                "--output",
+                "/out",
+                "--bundle-workers",
+                invalid,
+            ])
+            .is_err()
+        );
+    }
 }

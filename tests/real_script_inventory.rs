@@ -49,6 +49,7 @@ fn approved_scripts_match_complete_evidence() {
         let mut session = reader.open_bundle(&input).unwrap();
         let objects = session.raw_script_objects().unwrap();
         opens += session.metrics().bundle_opens;
+        session.finish().unwrap();
         for raw in objects {
             results.push(parse_script_object(&raw).unwrap_or_else(|e| {
                 panic!(

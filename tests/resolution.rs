@@ -11,7 +11,7 @@ use mgwt_voice_dataset_builder::{
     },
     normalize::NormalizationResult,
     paths::ValidatedAppPath,
-    resolution::{TerminalKind, resolve},
+    resolution::{TerminalKind, resolve, resolve_with_workers},
     speaker::SpeakerResolution,
     unity::{BundleSession, PayloadBinding, UnityBackend},
 };
@@ -36,6 +36,7 @@ use std::{
     collections::BTreeMap,
     io::Write,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 fn script(id: &str, voice: &str, text: &str, speaker: &str) -> ScriptReference {
@@ -129,13 +130,17 @@ fn wave(sample: i16) -> Vec<u8> {
 #[derive(Default)]
 struct State {
     opens: BTreeMap<String, usize>,
+    finishes: BTreeMap<String, usize>,
     streams: BTreeMap<String, usize>,
+    active_streams: usize,
+    max_active_streams: usize,
 }
 struct FakeBackend {
     state: Arc<Mutex<State>>,
     wavs: BTreeMap<String, Vec<u8>>,
     failures: BTreeMap<String, UnityErrorKind>,
     receipt_hash_override: BTreeMap<String, String>,
+    stream_delay: Duration,
 }
 struct FakeSession {
     bundle: String,
@@ -143,6 +148,7 @@ struct FakeSession {
     wavs: BTreeMap<String, Vec<u8>>,
     failures: BTreeMap<String, UnityErrorKind>,
     receipt_hash_override: BTreeMap<String, String>,
+    stream_delay: Duration,
 }
 impl UnityBackend for FakeBackend {
     type Session = FakeSession;
@@ -160,10 +166,21 @@ impl UnityBackend for FakeBackend {
             wavs: self.wavs.clone(),
             failures: self.failures.clone(),
             receipt_hash_override: self.receipt_hash_override.clone(),
+            stream_delay: self.stream_delay,
         })
     }
 }
 impl BundleSession for FakeSession {
+    fn finish(self) -> Result<(), AppError> {
+        *self
+            .state
+            .lock()
+            .unwrap()
+            .finishes
+            .entry(self.bundle)
+            .or_default() += 1;
+        Ok(())
+    }
     fn raw_script_objects(
         &mut self,
     ) -> Result<Vec<mgwt_voice_dataset_builder::model::RawScriptObject>, AppError> {
@@ -180,18 +197,23 @@ impl BundleSession for FakeSession {
     ) -> Result<DecodedAudioReceipt, AppError> {
         assert_eq!(self.bundle, a.bundle_path);
         let id = audio_candidate_id(a);
-        self.state
-            .lock()
-            .unwrap()
-            .streams
-            .entry(id.clone())
-            .and_modify(|n| *n += 1)
-            .or_insert(1);
+        {
+            let mut state = self.state.lock().unwrap();
+            state
+                .streams
+                .entry(id.clone())
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            state.active_streams += 1;
+            state.max_active_streams = state.max_active_streams.max(state.active_streams);
+        }
+        std::thread::sleep(self.stream_delay);
+        self.state.lock().unwrap().active_streams -= 1;
         if let Some(kind) = self.failures.get(&id) {
             if let Some(wav) = self.wavs.get(&id) {
                 sink.write_all(&wav[..wav.len() - 1]).unwrap();
             }
-            return Err(AppError::unity(*kind, "fake decode failure"));
+            return Err(AppError::unity(*kind, format!("fake decode failure {id}")));
         }
         let wav = &self.wavs[&id];
         for part in wav.chunks(3) {
@@ -258,6 +280,7 @@ fn backend(
             .map(|(a, kind)| (audio_candidate_id(a), *kind))
             .collect(),
         receipt_hash_override: BTreeMap::new(),
+        stream_delay: Duration::ZERO,
     }
 }
 #[test]
@@ -568,5 +591,156 @@ fn decoder_receipt_hash_must_match_staged_wav_and_cleanup_on_mismatch() {
         |_, _| Ok(()),
     );
     assert!(result.is_err());
+    assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn independent_bundles_stage_concurrently_and_finalize_identically() {
+    let refs = [
+        audio("A", "a", 1, false),
+        audio("B", "b", 2, false),
+        audio("C", "c", 3, false),
+        audio("D", "d", 4, false),
+    ];
+    let scripts = [
+        script("s-a", "A", "a", "Coco"),
+        script("s-b", "B", "b", "Coco"),
+        script("s-c", "C", "c", "Coco"),
+        script("s-d", "D", "d", "Coco"),
+    ];
+    let plan = match_candidates(&scripts, &refs, &[]).unwrap();
+    let (_app, approved) = approved(&["a", "b", "c", "d"]);
+    let pairs: Vec<_> = refs.iter().zip([1, 2, 3, 4]).collect();
+    let mut serial = backend(&pairs, &[]);
+    serial.stream_delay = Duration::from_millis(100);
+    let serial_stage = tempfile::tempdir().unwrap();
+    let serial_result = resolve_with_workers(
+        &plan,
+        &serial,
+        &approved,
+        serial_stage.path(),
+        &AudioLimits::default(),
+        1,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+
+    let mut parallel = backend(&pairs, &[]);
+    parallel.stream_delay = Duration::from_millis(100);
+    let parallel_stage = tempfile::tempdir().unwrap();
+    let mut max_reserved = 0;
+    let parallel_result = resolve_with_workers(
+        &plan,
+        &parallel,
+        &approved,
+        parallel_stage.path(),
+        &AudioLimits::default(),
+        4,
+        |_, in_flight| {
+            max_reserved = max_reserved.max(in_flight);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(parallel.state.lock().unwrap().max_active_streams, 4);
+    assert_eq!(max_reserved, 4 * 46);
+    let state = parallel.state.lock().unwrap();
+    assert_eq!(state.opens, state.finishes);
+    drop(state);
+    assert_eq!(
+        serial_result
+            .rows
+            .iter()
+            .map(|r| (&r.voice_ids, &r.audio.wav_sha256))
+            .collect::<Vec<_>>(),
+        parallel_result
+            .rows
+            .iter()
+            .map(|r| (&r.voice_ids, &r.audio.wav_sha256))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        parallel_result.terminal_sources.len(),
+        serial_result.terminal_sources.len()
+    );
+    assert_eq!(
+        parallel
+            .state
+            .lock()
+            .unwrap()
+            .opens
+            .values()
+            .copied()
+            .collect::<Vec<_>>(),
+        [1; 4]
+    );
+}
+
+#[test]
+fn parallel_disk_failure_cleans_all_owned_stages() {
+    let a = audio("A", "a", 1, false);
+    let b = audio("B", "b", 2, false);
+    let plan = match_candidates(
+        &[
+            script("s-a", "A", "a", "Coco"),
+            script("s-b", "B", "b", "Coco"),
+        ],
+        &[a.clone(), b.clone()],
+        &[],
+    )
+    .unwrap();
+    let (_app, approved) = approved(&["a", "b"]);
+    let staging = tempfile::tempdir().unwrap();
+    let fake = backend(&[(&a, 1), (&b, 2)], &[]);
+    let result = resolve_with_workers(
+        &plan,
+        &fake,
+        &approved,
+        staging.path(),
+        &AudioLimits::default(),
+        2,
+        |already, next| {
+            if already + next > 46 {
+                Err(AppError::processing("disk reservation refused"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn parallel_failures_choose_first_bundle_error_after_join() {
+    let a = audio("A", "a", 1, false);
+    let b = audio("B", "b", 2, false);
+    let plan = match_candidates(
+        &[
+            script("s-a", "A", "a", "Coco"),
+            script("s-b", "B", "b", "Coco"),
+        ],
+        &[a.clone(), b.clone()],
+        &[],
+    )
+    .unwrap();
+    let (_app, approved) = approved(&["a", "b"]);
+    let staging = tempfile::tempdir().unwrap();
+    let fake = backend(
+        &[(&a, 1), (&b, 2)],
+        &[(&a, UnityErrorKind::Io), (&b, UnityErrorKind::Io)],
+    );
+    let error = resolve_with_workers(
+        &plan,
+        &fake,
+        &approved,
+        staging.path(),
+        &AudioLimits::default(),
+        2,
+        |_, _| Ok(()),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains(&audio_candidate_id(&a)));
+    assert_eq!(fake.state.lock().unwrap().streams.len(), 2);
     assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
 }

@@ -153,7 +153,13 @@ pub fn build_app(
     app: &ValidatedAppPath,
     output: &ValidatedOutputPath,
     shard_audio_mib: u64,
+    bundle_workers: usize,
 ) -> Result<Report, AppError> {
+    if !(1..=4).contains(&bundle_workers) {
+        return Err(AppError::validation(
+            "bundle worker count must be between 1 and 4",
+        ));
+    }
     let interruption = BuildInterruption::new()?;
     let approval = crate::config::checked_in_approval()?;
     let pre = inventory::inventory_app(app, &approval.manifest)?;
@@ -179,6 +185,9 @@ pub fn build_app(
         )
         .ok_or_else(|| AppError::processing("snapshot reserve overflow"))?;
     let next_shard = shard_target.max(MAX_SINGLE_WAV);
+    let parallel_snapshot_reserve = max_snapshot
+        .checked_mul(bundle_workers as u64)
+        .ok_or_else(|| AppError::processing("parallel snapshot reserve overflow"))?;
     check_disk(output, 0, next_shard, max_snapshot)?;
     delivery::build_from_validated(
         output,
@@ -197,7 +206,9 @@ pub fn build_app(
                 check_disk(output, 0, next_shard, bundle.size)?;
                 let approved = bound_bundle(app, bundle)?;
                 let mut session = reader.open_bundle(&approved)?;
-                for raw in session.raw_script_objects()? {
+                let raw_objects = session.raw_script_objects();
+                session.finish()?;
+                for raw in raw_objects? {
                     interruption.check()?;
                     parsed.push(parse_script_object(&raw)?);
                 }
@@ -277,7 +288,9 @@ pub fn build_app(
                 check_disk(output, 0, next_shard, bundle.size)?;
                 let approved = bound_bundle(app, bundle)?;
                 let mut session = reader.open_bundle(&approved)?;
-                let references = session.audio_refs()?;
+                let references = session.audio_refs();
+                session.finish()?;
+                let references = references?;
                 independent_audio = independent_audio
                     .checked_add(references.len())
                     .ok_or_else(|| AppError::processing("audio source count overflow"))?;
@@ -294,15 +307,16 @@ pub fn build_app(
                     prior_rejections: independent_rejections,
                 },
             )?;
-            let resolved = resolution::resolve(
+            let resolved = resolution::resolve_with_workers(
                 &plan,
                 &reader,
                 &voice_inputs,
                 work,
                 &crate::model::AudioLimits::default(),
+                bundle_workers,
                 |_already_staged, next_wav| {
                     interruption.check()?;
-                    check_disk(output, next_wav, next_shard, max_snapshot)
+                    check_disk(output, next_wav, next_shard, parallel_snapshot_reserve)
                 },
             )?;
             if resolved.rows.is_empty() {

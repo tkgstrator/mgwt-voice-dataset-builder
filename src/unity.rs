@@ -80,6 +80,8 @@ pub trait BundleSession {
         sink: &mut dyn Write,
         limits: &crate::model::AudioLimits,
     ) -> Result<crate::model::DecodedAudioReceipt, AppError>;
+    /// Recheck the owned bundle snapshot once after the session's work is complete.
+    fn finish(self) -> Result<(), AppError>;
 }
 
 #[derive(Debug, Clone)]
@@ -140,7 +142,6 @@ impl UnitySession {
 
 impl BundleSession for UnitySession {
     fn raw_script_objects(&mut self) -> Result<Vec<RawScriptObject>, AppError> {
-        snapshot_result(self.snapshots.checkpoint())?;
         let mut scripts = Vec::new();
         let mut remaining = 256 * 1024 * 1024_usize;
         for (file_index, loaded) in self.collection.serialized_files().iter().enumerate() {
@@ -180,11 +181,9 @@ impl BundleSession for UnitySession {
                 b.path_id,
             ))
         });
-        snapshot_result(self.snapshots.checkpoint())?;
         Ok(scripts)
     }
     fn audio_refs(&mut self) -> Result<Vec<AudioAssetRef>, AppError> {
-        snapshot_result(self.snapshots.checkpoint())?;
         if let Some(refs) = &self.cached_audio_refs {
             return Ok(refs.clone());
         }
@@ -210,7 +209,6 @@ impl BundleSession for UnitySession {
                 b.path_id,
             ))
         });
-        snapshot_result(self.snapshots.checkpoint())?;
         self.cached_audio_refs = Some(refs.clone());
         Ok(refs)
     }
@@ -220,18 +218,28 @@ impl BundleSession for UnitySession {
         sink: &mut dyn Write,
         limits: &AudioLimits,
     ) -> Result<DecodedAudioReceipt, AppError> {
-        snapshot_result(self.snapshots.checkpoint())?;
-        let result = (|| {
+        (|| {
             if reference.bundle_path != self.bundle_path {
                 return Err(approved_input(
                     "AudioClip locator belongs to another bundle",
                 ));
             }
-            if !self
-                .audio_refs()?
-                .iter()
-                .any(|current| current == reference)
-            {
+            if self.cached_audio_refs.is_none() {
+                self.audio_refs()?;
+            }
+            let indexed = self
+                .cached_audio_refs
+                .as_ref()
+                .expect("audio index initialized");
+            let key = (
+                reference.file_index,
+                reference.object_index,
+                reference.path_id,
+            );
+            let matching = indexed.binary_search_by(|current| {
+                (current.file_index, current.object_index, current.path_id).cmp(&key)
+            });
+            if !matching.is_ok_and(|index| indexed[index] == *reference) {
                 return Err(approved_input(
                     "AudioClip locator does not match indexed metadata",
                 ));
@@ -289,9 +297,12 @@ impl BundleSession for UnitySession {
                 frame_count_source,
                 peak_live_buffer_bytes: wav.peak_live_buffer_bytes,
             })
-        })();
-        snapshot_result(self.snapshots.checkpoint())?;
-        result
+        })()
+    }
+
+    fn finish(self) -> Result<(), AppError> {
+        drop(self.collection);
+        snapshot_result(self.snapshots.checkpoint())
     }
 }
 
@@ -1513,6 +1524,7 @@ mod tests {
                 .unwrap();
             assert_eq!(later, wav);
             assert_eq!(session.metrics().bundle_opens, 1);
+            session.finish().unwrap();
         }
     }
 
@@ -1531,6 +1543,37 @@ mod tests {
         assert_eq!(output, fixture_wav());
         assert_eq!(receipt.wav_bytes, output.len() as u64);
         assert_eq!(receipt.frame_count, 1);
+        session.finish().unwrap();
+    }
+
+    #[test]
+    fn session_finish_detects_owned_snapshot_mutation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (mut session, _app, scratch) = fixture_session(PayloadLayout::Inline);
+        let reference = session.audio_refs().unwrap().remove(0);
+        let mut output = Vec::new();
+        session
+            .stream_audio(&reference, &mut output, &AudioLimits::default())
+            .unwrap();
+        let stage = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let snapshot = std::fs::read_dir(stage)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::set_permissions(&snapshot, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&snapshot, b"tampered").unwrap();
+        assert_eq!(
+            session.finish().unwrap_err().unity_kind(),
+            Some(UnityErrorKind::ApprovedInput)
+        );
     }
 
     fn fixture_bundle(blocks: &[(u32, u16, Vec<u8>)], entries: &[(u64, u64, &str)]) -> Vec<u8> {

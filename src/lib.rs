@@ -45,11 +45,12 @@ pub fn run(cli: Cli) -> Result<RunOutcome, AppError> {
             app,
             output,
             shard_audio_mib,
+            bundle_workers,
         } => {
             validate_separation(&app, &output)?;
             let app = ValidatedAppPath::new(&app)?;
             let output = ValidatedOutputPath::new(&output, &app)?;
-            build::build_app(&app, &output, shard_audio_mib)?;
+            build::build_app(&app, &output, shard_audio_mib, usize::from(bundle_workers))?;
             Ok(RunOutcome::Complete)
         }
         Command::Verify { input } => {

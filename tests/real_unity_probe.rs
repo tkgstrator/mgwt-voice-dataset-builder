@@ -328,7 +328,7 @@ fn approved_pair_and_pcm_compatibility_gate() {
     let script_objects = scripts.raw_script_objects().unwrap();
     assert_eq!(script_objects.len(), 17);
     assert_eq!(scripts.metrics().bundle_opens, 1);
-    drop(scripts);
+    scripts.finish().unwrap();
 
     let oracle: Value =
         serde_json::from_slice(&std::fs::read(&python_paths.oracle).unwrap()).unwrap();
@@ -542,7 +542,7 @@ fn approved_pair_and_pcm_compatibility_gate() {
     assert_eq!(first_hashes.len(), expected_ids.len());
     assert_eq!(session.metrics().bundle_opens, 1);
     assert!(session.metrics().peak_live_buffer_bytes <= 256 * 1024);
-    drop(session);
+    session.finish().unwrap();
     // A fresh verified snapshot and UnityFS open must reproduce each WAV exactly.
     let mut second = reader
         .open_bundle(&verified_bundle(&app, voice_entry))
@@ -560,12 +560,14 @@ fn approved_pair_and_pcm_compatibility_gate() {
         assert_eq!(&receipt.wav_sha256, first_hash);
     }
     assert_eq!(second.metrics().bundle_opens, 1);
+    let second_peak = second.metrics().peak_live_buffer_bytes;
+    second.finish().unwrap();
     let post_inventory = inventory_app(&app, &approval.manifest).unwrap();
     assert_eq!(pre_inventory, post_inventory);
     eprintln!(
         "script_objects=17 audio_refs=1753 signatures={} oracle_reproduced=3 rust_repeat_hashes={} pcm_metrics={evidence:?} first_pass_open=1 second_pass_open=1 peak_sink_bytes={}",
         signatures.len(),
         first_hashes.len(),
-        second.metrics().peak_live_buffer_bytes
+        second_peak
     );
 }

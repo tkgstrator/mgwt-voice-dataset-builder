@@ -16,7 +16,53 @@ use std::{
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
+    sync::Mutex,
+    thread,
 };
+
+struct DiskGate<D> {
+    check: D,
+    staged: u64,
+    reserved: u64,
+}
+
+impl<D: FnMut(u64, u64) -> Result<(), AppError>> DiskGate<D> {
+    fn check_open(&mut self) -> Result<(), AppError> {
+        (self.check)(self.staged, self.reserved)
+    }
+    fn reserve(&mut self, bytes: u64) -> Result<(), AppError> {
+        let reserved = self
+            .reserved
+            .checked_add(bytes)
+            .ok_or_else(|| fatal("staged WAV reservation overflow"))?;
+        self.staged
+            .checked_add(reserved)
+            .ok_or_else(|| fatal("staged WAV total overflow"))?;
+        (self.check)(self.staged, reserved)?;
+        self.reserved = reserved;
+        Ok(())
+    }
+}
+
+struct DiskReservation<'a, D> {
+    gate: &'a Mutex<DiskGate<D>>,
+    bytes: u64,
+    committed: bool,
+}
+impl<D> DiskReservation<'_, D> {
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+impl<D> Drop for DiskReservation<'_, D> {
+    fn drop(&mut self) {
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        gate.reserved -= self.bytes;
+        if self.committed {
+            gate.staged += self.bytes;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalKind {
@@ -281,8 +327,89 @@ fn reject_script(
     }
 }
 
+fn stage_bundle<B, D>(
+    work: &mut [Work],
+    backend: &B,
+    approved: &BTreeMap<String, VerifiedBundleInputs>,
+    staging: &Path,
+    limits: &AudioLimits,
+    disk: &Mutex<DiskGate<D>>,
+    owned: &Mutex<&mut OwnedFiles>,
+) -> Result<usize, AppError>
+where
+    B: UnityBackend + Sync,
+    D: FnMut(u64, u64) -> Result<(), AppError> + Send,
+{
+    if work.iter().all(|w| w.failed) {
+        return Ok(0);
+    }
+    disk.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .check_open()?;
+    let bundle = &work[0].reference.bundle_path;
+    let mut session = backend.open_bundle(&approved[bundle])?;
+    let result = (|| {
+        let mut peak = 0;
+        for w in work {
+            if w.failed {
+                continue;
+            }
+            let expected = w.expected_bytes.expect("measured or header sized");
+            {
+                let mut gate = disk.lock().unwrap_or_else(|e| e.into_inner());
+                gate.reserve(expected)?;
+            }
+            let mut reservation = DiskReservation {
+                gate: disk,
+                bytes: expected,
+                committed: false,
+            };
+            let path = staging.join(format!("{}.wav", w.id));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| fatal(format!("create staged WAV: {e}")))?;
+            owned
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .track(path.clone());
+            let result = decode(&mut session, &w.reference, &mut file, limits);
+            match result {
+                Ok((props, live)) => {
+                    file.sync_all()
+                        .map_err(|e| fatal(format!("sync staged WAV: {e}")))?;
+                    if props.wav_bytes != expected
+                        || w.measurement.as_ref().is_some_and(|m| {
+                            m.wav_sha256 != props.wav_sha256 || m.frame_count != props.frame_count
+                        })
+                    {
+                        return Err(fatal("measurement and staging WAV disagree"));
+                    }
+                    peak = peak.max(live);
+                    w.staged = Some(Staged { path, audio: props });
+                    reservation.commit();
+                }
+                Err(error) if is_local(&error) => {
+                    drop(file);
+                    owned
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&path)?;
+                    w.failed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(peak)
+    })();
+    session.finish()?;
+    result
+}
+
 /// Caller supplies an already-approved map and an existing private staging directory.
-/// The callback receives bytes already staged and bytes about to be written.
+/// The callback receives completed staged bytes and total reserved bytes for
+/// clips currently in flight, including the next clip.
 /// All files created here are removed on error.
 pub fn resolve<B, D>(
     plan: &MatchPlan,
@@ -290,12 +417,33 @@ pub fn resolve<B, D>(
     approved: &BTreeMap<String, VerifiedBundleInputs>,
     staging: &Path,
     limits: &AudioLimits,
+    check_disk: D,
+) -> Result<ResolvedDataset, AppError>
+where
+    B: UnityBackend + Sync,
+    D: FnMut(u64, u64) -> Result<(), AppError> + Send,
+{
+    resolve_with_workers(plan, backend, approved, staging, limits, 1, check_disk)
+}
+
+/// Stage independent bundles concurrently, up to four sessions at a time.
+/// Candidate order within each bundle and final accounting remain deterministic.
+pub fn resolve_with_workers<B, D>(
+    plan: &MatchPlan,
+    backend: &B,
+    approved: &BTreeMap<String, VerifiedBundleInputs>,
+    staging: &Path,
+    limits: &AudioLimits,
+    workers: usize,
     mut check_disk: D,
 ) -> Result<ResolvedDataset, AppError>
 where
-    B: UnityBackend,
-    D: FnMut(u64, u64) -> Result<(), AppError>,
+    B: UnityBackend + Sync,
+    D: FnMut(u64, u64) -> Result<(), AppError> + Send,
 {
+    if !(1..=4).contains(&workers) {
+        return Err(fatal("bundle worker count must be between 1 and 4"));
+    }
     if !staging.is_dir() {
         return Err(fatal("staging directory is missing"));
     }
@@ -361,80 +509,86 @@ where
             if work[i..end].iter().any(|w| w.expected_bytes.is_none()) {
                 check_disk(0, 0)?;
                 let mut session = backend.open_bundle(&approved[&bundle])?;
-                for w in &mut work[i..end] {
-                    if w.expected_bytes.is_some() {
-                        continue;
-                    }
-                    match decode(&mut session, &w.reference, &mut io::sink(), limits) {
-                        Ok((props, live)) => {
-                            w.expected_bytes = Some(props.wav_bytes);
-                            w.measurement = Some(props);
-                            peak = peak.max(live);
+                let result = (|| {
+                    for w in &mut work[i..end] {
+                        if w.expected_bytes.is_some() {
+                            continue;
                         }
-                        Err(error) if is_local(&error) => {
-                            w.failed = true;
+                        match decode(&mut session, &w.reference, &mut io::sink(), limits) {
+                            Ok((props, live)) => {
+                                w.expected_bytes = Some(props.wav_bytes);
+                                w.measurement = Some(props);
+                                peak = peak.max(live);
+                            }
+                            Err(error) if is_local(&error) => {
+                                w.failed = true;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(error) => return Err(error),
                     }
-                }
+                    Ok(())
+                })();
+                session.finish()?;
+                result?;
             }
             i = end;
         }
-        let mut cumulative = 0_u64;
-        i = 0;
-        while i < work.len() {
-            let bundle = work[i].reference.bundle_path.clone();
-            let end = i + work[i..]
+        // Each mutable slice belongs to one bundle; no Unity session crosses threads.
+        let mut bundles = Vec::new();
+        let mut remaining = work.as_mut_slice();
+        while !remaining.is_empty() {
+            let count = remaining
                 .iter()
-                .take_while(|w| w.reference.bundle_path == bundle)
+                .take_while(|w| w.reference.bundle_path == remaining[0].reference.bundle_path)
                 .count();
-            if work[i..end].iter().any(|w| !w.failed) {
-                check_disk(cumulative, 0)?;
-                let mut session = backend.open_bundle(&approved[&bundle])?;
-                for w in &mut work[i..end] {
-                    if w.failed {
-                        continue;
-                    }
-                    let expected = w.expected_bytes.expect("measured or header sized");
-                    let reserved = cumulative
-                        .checked_add(expected)
-                        .ok_or_else(|| fatal("staged WAV total overflow"))?;
-                    check_disk(cumulative, expected)?;
-                    let path = staging.join(format!("{}.wav", w.id));
-                    let mut file = OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&path)
-                        .map_err(|e| fatal(format!("create staged WAV: {e}")))?;
-                    owned.track(path.clone());
-                    let result = decode(&mut session, &w.reference, &mut file, limits);
-                    match result {
-                        Ok((props, live)) => {
-                            file.sync_all()
-                                .map_err(|e| fatal(format!("sync staged WAV: {e}")))?;
-                            if props.wav_bytes != expected
-                                || w.measurement.as_ref().is_some_and(|m| {
-                                    m.wav_sha256 != props.wav_sha256
-                                        || m.frame_count != props.frame_count
-                                })
-                            {
-                                return Err(fatal("measurement and staging WAV disagree"));
-                            }
-                            cumulative = reserved;
-                            peak = peak.max(live);
-                            w.staged = Some(Staged { path, audio: props });
-                            health.get_mut(&bundle).unwrap().successful_decodes += 1;
-                        }
-                        Err(error) if is_local(&error) => {
-                            drop(file);
-                            owned.remove(&path)?;
-                            w.failed = true;
-                        }
-                        Err(error) => return Err(error),
-                    }
+            let (bundle, rest) = remaining.split_at_mut(count);
+            bundles.push(bundle);
+            remaining = rest;
+        }
+        let disk = Mutex::new(DiskGate {
+            check: &mut check_disk,
+            staged: 0,
+            reserved: 0,
+        });
+        let files = Mutex::new(&mut owned);
+        for batch in bundles.chunks_mut(workers) {
+            let results = thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for bundle in batch.iter_mut() {
+                    let chunk = &mut **bundle;
+                    let disk = &disk;
+                    let files = &files;
+                    handles.push(scope.spawn(move || {
+                        stage_bundle(chunk, backend, approved, staging, limits, disk, files)
+                    }));
                 }
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle
+                            .join()
+                            .unwrap_or_else(|_| Err(fatal("bundle staging worker panicked")))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // All workers are joined before selecting the first error in bundle order.
+            // This also leaves centralized OwnedFiles cleanup safe on interruption.
+            let mut batch_peak = 0usize;
+            for result in results {
+                batch_peak = batch_peak
+                    .checked_add(result?)
+                    .ok_or_else(|| fatal("parallel live-buffer accounting overflow"))?;
             }
-            i = end;
+            peak = peak.max(batch_peak);
+        }
+        drop(files);
+        for w in &work {
+            if w.staged.is_some() {
+                health
+                    .get_mut(&w.reference.bundle_path)
+                    .unwrap()
+                    .successful_decodes += 1;
+            }
         }
         for b in health.values_mut() {
             b.candidate_failures = b.eligible_attempts - b.successful_decodes;
