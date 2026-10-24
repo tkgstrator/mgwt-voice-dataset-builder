@@ -4,8 +4,9 @@ use crate::{
     error::AppError,
     hash::sha256_bytes,
     model::{
-        CandidateRejection, ParsedScriptReference, RawScriptObject, ScriptParseResult,
-        ScriptProvenance, ScriptReference, ScriptResolutionResult, SpeakerEvidenceRecord,
+        CandidateKind, CandidateProvenance, CandidateRejection, ParsedScriptReference,
+        RawScriptObject, ScriptParseResult, ScriptProvenance, ScriptReference,
+        ScriptResolutionResult, SpeakerEvidenceRecord,
     },
     normalize::{normalize_transcription, normalize_voice_id},
     speaker::{resolve_speaker, safe_speaker},
@@ -126,6 +127,7 @@ fn reject(
 ) -> CandidateRejection {
     CandidateRejection {
         candidate_id: candidate_id(source),
+        candidate_kind: CandidateKind::ScriptReference,
         group_id: if blocking.len() == 1 {
             Some(blocking[0].clone())
         } else {
@@ -133,7 +135,7 @@ fn reject(
         },
         terminal_stage: stage,
         reason,
-        provenance: source.clone(),
+        provenance: CandidateProvenance::Script(source.clone()),
         blocking_group_ids: blocking,
     }
 }

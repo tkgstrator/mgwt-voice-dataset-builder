@@ -12,6 +12,27 @@ pub struct ScriptProvenance {
     pub command_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioProvenance {
+    pub bundle_path: String,
+    pub file_index: usize,
+    pub object_index: usize,
+    pub path_id: i64,
+    pub container_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateProvenance {
+    Script(ScriptProvenance),
+    Audio(AudioProvenance),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateKind {
+    ScriptReference,
+    AudioAsset,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParsedScriptReference {
     pub candidate_id: String,
@@ -34,10 +55,11 @@ pub struct ScriptReference {
 #[derive(Debug, Clone)]
 pub struct CandidateRejection {
     pub candidate_id: String,
+    pub candidate_kind: CandidateKind,
     pub group_id: Option<String>,
     pub terminal_stage: &'static str,
     pub reason: &'static str,
-    pub provenance: ScriptProvenance,
+    pub provenance: CandidateProvenance,
     pub blocking_group_ids: Vec<String>,
 }
 

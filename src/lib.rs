@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod hash;
 pub mod inventory;
+pub mod matching;
 pub mod model;
 pub mod naninovel;
 pub mod normalize;
