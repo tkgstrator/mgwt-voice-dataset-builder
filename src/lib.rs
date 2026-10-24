@@ -20,8 +20,8 @@ pub fn run(cli: Cli) -> Result<RunOutcome, AppError> {
     match cli.command {
         Command::Inspect { app, output } | Command::Build { app, output } => {
             validate_separation(&app, &output)?;
-            let _app = ValidatedAppPath::new(&app)?;
-            let _output = ValidatedOutputPath::new(&output)?;
+            let app = ValidatedAppPath::new(&app)?;
+            let _output = ValidatedOutputPath::new(&output, &app)?;
             Err(AppError::processing(
                 "command pipeline is not implemented yet",
             ))

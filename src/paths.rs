@@ -37,12 +37,34 @@ fn absolute_components(path: &Path) -> Result<(PathBuf, Vec<OsString>), AppError
     Ok((absolute, parts))
 }
 
-fn open_components(parts: &[OsString]) -> Result<OwnedFd, AppError> {
+fn open_components(
+    parts: &[OsString],
+    excluded_dir: Option<&OwnedFd>,
+) -> Result<OwnedFd, AppError> {
+    let excluded_stat = excluded_dir
+        .map(|fd| {
+            fs::fstat(fd).map_err(|e| AppError::validation(format!("inspect app directory: {e}")))
+        })
+        .transpose()?;
     let mut dir = fs::openat(fs::CWD, "/", DIR_FLAGS, Mode::empty())
         .map_err(|e| AppError::validation(format!("open filesystem root: {e}")))?;
+    if let Some(app_stat) = &excluded_stat {
+        let stat = fs::fstat(&dir)
+            .map_err(|e| AppError::validation(format!("inspect output ancestor: {e}")))?;
+        if (stat.st_dev, stat.st_ino) == (app_stat.st_dev, app_stat.st_ino) {
+            return Err(AppError::validation("output path is inside the app"));
+        }
+    }
     for part in parts {
         dir = fs::openat(&dir, part, DIR_FLAGS, Mode::empty())
             .map_err(|e| AppError::validation(format!("open path component {part:?}: {e}")))?;
+        if let Some(app_stat) = &excluded_stat {
+            let stat = fs::fstat(&dir)
+                .map_err(|e| AppError::validation(format!("inspect output ancestor: {e}")))?;
+            if (stat.st_dev, stat.st_ino) == (app_stat.st_dev, app_stat.st_ino) {
+                return Err(AppError::validation("output path is inside the app"));
+            }
+        }
     }
     Ok(dir)
 }
@@ -60,7 +82,7 @@ impl ValidatedAppPath {
         if parts.is_empty() {
             return Err(AppError::validation("app path must name a directory"));
         }
-        let dir = open_components(&parts)?;
+        let dir = open_components(&parts, None)?;
         Ok(Self { dir, absolute })
     }
 
@@ -81,12 +103,12 @@ pub struct ValidatedOutputPath {
 }
 
 impl ValidatedOutputPath {
-    pub fn new(path: &Path) -> Result<Self, AppError> {
+    pub fn new(path: &Path, app: &ValidatedAppPath) -> Result<Self, AppError> {
         let (absolute, parts) = absolute_components(path)?;
         let (leaf, parents) = parts
             .split_last()
             .ok_or_else(|| AppError::validation("output path must name a directory"))?;
-        let parent = open_components(parents)?;
+        let parent = open_components(parents, Some(app.dir()))?;
         match fs::statat(&parent, leaf, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(_) => return Err(AppError::validation("output leaf already exists")),
             Err(rustix::io::Errno::NOENT) => {}
