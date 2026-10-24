@@ -85,15 +85,27 @@ pub struct UnityReader {
     maximum_bundle_bytes: u64,
 }
 
+const MAXIMUM_BUNDLE_BYTES: u64 = 512 * 1024 * 1024;
+
+fn snapshot_result<T>(result: Result<T, AppError>) -> Result<T, AppError> {
+    result.map_err(|error| match error {
+        AppError::Validation(message) => approved_input(message),
+        other => other,
+    })
+}
+
 impl UnityReader {
     pub fn new(scratch: impl AsRef<Path>) -> Self {
-        Self::with_bundle_limit(scratch, 512 * 1024 * 1024)
+        Self::with_bundle_limit(scratch, MAXIMUM_BUNDLE_BYTES)
     }
     pub fn with_bundle_limit(scratch: impl AsRef<Path>, maximum_bundle_bytes: u64) -> Self {
         Self {
             scratch: scratch.as_ref().to_path_buf(),
-            maximum_bundle_bytes,
+            maximum_bundle_bytes: maximum_bundle_bytes.min(MAXIMUM_BUNDLE_BYTES),
         }
+    }
+    pub fn maximum_bundle_bytes(&self) -> u64 {
+        self.maximum_bundle_bytes
     }
 }
 
@@ -105,6 +117,7 @@ pub struct UnitySession {
     approved_external: Vec<String>,
     cached_audio_refs: Option<Vec<AudioAssetRef>>,
     peak_live_buffer_bytes: usize,
+    bundle_opens: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +129,7 @@ pub struct SessionMetrics {
 impl UnitySession {
     pub fn metrics(&self) -> SessionMetrics {
         SessionMetrics {
-            bundle_opens: 1,
+            bundle_opens: self.bundle_opens,
             peak_live_buffer_bytes: self.peak_live_buffer_bytes,
         }
     }
@@ -124,7 +137,7 @@ impl UnitySession {
 
 impl BundleSession for UnitySession {
     fn raw_script_objects(&mut self) -> Result<Vec<RawScriptObject>, AppError> {
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         let mut scripts = Vec::new();
         for (file_index, loaded) in self.collection.serialized_files().iter().enumerate() {
             for (object_index, object) in loaded.file.objects.iter().enumerate() {
@@ -148,11 +161,11 @@ impl BundleSession for UnitySession {
             }
         }
         scripts.sort_by(|a, b| (&a.bundle_path, a.path_id).cmp(&(&b.bundle_path, b.path_id)));
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         Ok(scripts)
     }
     fn audio_refs(&mut self) -> Result<Vec<AudioAssetRef>, AppError> {
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         if let Some(refs) = &self.cached_audio_refs {
             return Ok(refs.clone());
         }
@@ -171,7 +184,7 @@ impl BundleSession for UnitySession {
             }
         }
         refs.sort_by(|a, b| (&a.bundle_path, a.path_id).cmp(&(&b.bundle_path, b.path_id)));
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         self.cached_audio_refs = Some(refs.clone());
         Ok(refs)
     }
@@ -181,7 +194,7 @@ impl BundleSession for UnitySession {
         sink: &mut dyn Write,
         limits: &AudioLimits,
     ) -> Result<DecodedAudioReceipt, AppError> {
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         let result = (|| {
             if reference.bundle_path != self.bundle_path {
                 return Err(approved_input(
@@ -233,7 +246,7 @@ impl BundleSession for UnitySession {
                 ..wav
             })
         })();
-        self.snapshots.checkpoint()?;
+        snapshot_result(self.snapshots.checkpoint())?;
         result
     }
 }
@@ -250,11 +263,12 @@ impl UnityBackend for UnityReader {
             .scratch
             .canonicalize()
             .map_err(|e| AppError::unity(UnityErrorKind::Io, format!("scratch path: {e}")))?;
-        let snapshots = approved.snapshot_set_shared(&scratch)?;
+        let snapshots = snapshot_result(approved.snapshot_set_shared(&scratch))?;
         let bundle_path = approved.bundle.relative_path.clone();
-        let collection = snapshots.with_parser_paths(|bundle_snapshot, external| {
-            open_pinned_bundle(bundle_snapshot, &bundle_path, external)
-        })?;
+        let (collection, bundle_opens) =
+            snapshot_result(snapshots.with_parser_paths(|bundle_snapshot, external| {
+                open_pinned_bundle(bundle_snapshot, &bundle_path, external)
+            }))?;
         Ok(UnitySession {
             collection,
             snapshots,
@@ -266,6 +280,7 @@ impl UnityBackend for UnityReader {
                 .collect(),
             cached_audio_refs: None,
             peak_live_buffer_bytes: 0,
+            bundle_opens,
         })
     }
 }
@@ -294,11 +309,55 @@ fn decode_error(error: unity_rs_core::Error) -> AppError {
     }
 }
 
+fn parse_error(error: unity_rs_core::Error) -> AppError {
+    match error {
+        unity_rs_core::Error::InvalidData(message) => approved_input(message),
+        other => core_error(other),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ParseBudgets {
+    expanded_bytes: u64,
+    metadata_bytes: u64,
+    objects: usize,
+}
+
+impl Default for ParseBudgets {
+    fn default() -> Self {
+        Self {
+            expanded_bytes: 2 * 1024 * 1024 * 1024,
+            metadata_bytes: 256 * 1024 * 1024,
+            objects: 200_000,
+        }
+    }
+}
+
+fn counted_unityfs_open(
+    region: &Region,
+    limits: BundleParseLimits,
+    opens: &mut u64,
+) -> Result<UnityFsBundle, AppError> {
+    *opens = opens
+        .checked_add(1)
+        .ok_or_else(|| unexpected("bundle open counter overflow"))?;
+    UnityFsBundle::open_with_limits(region, limits).map_err(core_error)
+}
+
 fn open_pinned_bundle(
     path: &Path,
     bundle_path: &str,
     external: &[(String, PathBuf)],
-) -> Result<AssetCollection, AppError> {
+) -> Result<(AssetCollection, u64), AppError> {
+    open_pinned_bundle_with_budgets(path, bundle_path, external, ParseBudgets::default())
+}
+
+fn open_pinned_bundle_with_budgets(
+    path: &Path,
+    bundle_path: &str,
+    external: &[(String, PathBuf)],
+    budgets: ParseBudgets,
+) -> Result<(AssetCollection, u64), AppError> {
     let region = Region::from_file(path).map_err(core_error)?;
     let limits = BundleParseLimits {
         max_entries: 200_000,
@@ -307,17 +366,30 @@ fn open_pinned_bundle(
         max_entry_read_size: 512 * 1024 * 1024,
         ..BundleParseLimits::default()
     };
-    let bundle = UnityFsBundle::open_with_limits(&region, limits).map_err(core_error)?;
+    let mut bundle_opens = 0;
+    let bundle = counted_unityfs_open(&region, limits, &mut bundle_opens)?;
+    let block_expanded = bundle
+        .blocks
+        .iter()
+        .try_fold(0_u64, |total, block| {
+            total.checked_add(u64::from(block.uncompressed_size))
+        })
+        .ok_or_else(|| approved_input("expanded storage-block sum overflow"))?;
+    if block_expanded > budgets.expanded_bytes {
+        return Err(approved_input("expanded storage blocks exceed hard limit"));
+    }
     let expanded = bundle
         .entries
         .iter()
         .try_fold(0_u64, |total, entry| total.checked_add(entry.size))
         .ok_or_else(|| approved_input("expanded bundle size overflow"))?;
-    if expanded > 2 * 1024 * 1024 * 1024 {
+    if expanded > budgets.expanded_bytes {
         return Err(approved_input("expanded bundle exceeds hard limit"));
     }
     let mut files = Vec::new();
     let mut resources = Vec::new();
+    let mut metadata_remaining = budgets.metadata_bytes;
+    let mut objects_remaining = budgets.objects;
     for (index, entry) in bundle.entries.iter().enumerate() {
         let entry_region = bundle.entry_region(index).map_err(core_error)?;
         let mut header = vec![0; (entry.size as usize).min(HEADER_SCAN_LENGTH)];
@@ -328,8 +400,8 @@ fn open_pinned_bundle(
         match detect_file_type(&header, entry.size).file_type {
             FileType::AssetsFile => {
                 let parse_limits = SerializedParseLimits {
-                    maximum_metadata_bytes: 256 * 1024 * 1024,
-                    maximum_objects: 200_000,
+                    maximum_metadata_bytes: metadata_remaining,
+                    maximum_objects: objects_remaining,
                     maximum_string_bytes: 1024 * 1024,
                     ..SerializedParseLimits::default()
                 };
@@ -342,7 +414,13 @@ fn open_pinned_bundle(
                         ..SerializedOpenOptions::default()
                     },
                 )
-                .map_err(core_error)?;
+                .map_err(parse_error)?;
+                metadata_remaining = metadata_remaining
+                    .checked_sub(u64::from(file.header.metadata_size))
+                    .ok_or_else(|| approved_input("aggregate serialized metadata exceeds limit"))?;
+                objects_remaining = objects_remaining
+                    .checked_sub(file.objects.len())
+                    .ok_or_else(|| approved_input("aggregate serialized objects exceed limit"))?;
                 if file.unity_version.to_string() != "6000.0.48f1" {
                     return Err(unsupported("Unity version is outside the approved layout"));
                 }
@@ -365,15 +443,28 @@ fn open_pinned_bundle(
     }
     let mut collection = AssetCollection::from_loaded_parts(files, resources);
     let metadata_limits = AssetLoadLimits {
-        maximum_object_metadata_entries: 200_000,
+        maximum_object_metadata_entries: budgets.objects,
         maximum_object_metadata_index_bytes: 256 * 1024 * 1024,
+        maximum_reference_index_entries: budgets
+            .objects
+            .saturating_add(collection.serialized_files().len()),
+        maximum_resource_index_entries: 200_000,
+        maximum_container_assignments: budgets.objects,
+        maximum_object_name_assignments: budgets.objects,
+        maximum_total_object_name_bytes: 256 * 1024 * 1024,
         maximum_path_bytes: 4096,
         ..AssetLoadLimits::default()
     };
     collection
         .resolve_object_metadata(metadata_limits)
         .map_err(core_error)?;
-    Ok(collection)
+    collection
+        .rebuild_reference_index(metadata_limits)
+        .map_err(core_error)?;
+    collection
+        .rebuild_resource_index(metadata_limits)
+        .map_err(core_error)?;
+    Ok((collection, bundle_opens))
 }
 
 fn type_tree_limits() -> TypeTreeReadLimits {
@@ -665,31 +756,9 @@ fn project_audio_clip(
         maximum_payload_bytes: 256 * 1024 * 1024,
         ..SimpleAssetReadLimits::default()
     };
-    let read = |collection: &AssetCollection, file_index| {
-        read_audio_clip_asset_by_file_index(collection, file_index, object_index, limits)
-            .map_err(core_error)
-    };
-    let mut asset = read(collection, file_index)?;
-    if asset.payload != expected_region {
-        let selected_key = match &binding {
-            PayloadBinding::BundleResource { key, .. } => Some(key.as_str()),
-            PayloadBinding::External { source, .. } => Some(source.as_str()),
-            PayloadBinding::Inline { .. } => None,
-        };
-        let selected = selected_key
-            .and_then(|key| {
-                collection
-                    .resources()
-                    .iter()
-                    .find(|resource| resource.path == key)
-            })
-            .ok_or_else(|| {
-                unsupported("AudioClip high-level payload did not match exact source")
-            })?;
-        let scoped =
-            AssetCollection::from_loaded_parts(vec![loaded.clone()], vec![selected.clone()]);
-        asset = read(&scoped, 0)?;
-    }
+    let scoped = exact_scoped_collection(collection, file_index, &binding)?;
+    let asset = read_audio_clip_asset_by_file_index(&scoped, 0, object_index, limits)
+        .map_err(core_error)?;
     if asset.path_id != object.path_id || asset.name != name || asset.payload != expected_region {
         return Err(unsupported(
             "AudioClip TypeTree, core asset, and exact source disagree",
@@ -740,6 +809,42 @@ fn project_audio_clip(
         predecode_frames,
         signature,
     })
+}
+
+/// Build a collection containing only the verified source before invoking the
+/// high-level reader. Its portable-name lookup is never allowed to inspect a
+/// competing resource, even transiently.
+fn exact_scoped_collection(
+    collection: &AssetCollection,
+    file_index: usize,
+    binding: &PayloadBinding,
+) -> Result<AssetCollection, AppError> {
+    let file = collection
+        .serialized_files()
+        .get(file_index)
+        .ok_or_else(|| approved_input("AudioClip locator file is absent"))?
+        .clone();
+    let selected = match binding {
+        PayloadBinding::Inline { .. } => None,
+        PayloadBinding::BundleResource { key, .. } => Some(key.as_str()),
+        PayloadBinding::External { source, .. } => Some(source.as_str()),
+    };
+    let resources = if let Some(key) = selected {
+        let mut exact = collection
+            .resources()
+            .iter()
+            .filter(|resource| resource.path == key);
+        let resource = exact
+            .next()
+            .ok_or_else(|| approved_input("selected AudioClip resource is absent"))?;
+        if exact.next().is_some() {
+            return Err(approved_input("selected AudioClip resource is duplicated"));
+        }
+        vec![resource.clone()]
+    } else {
+        Vec::new()
+    };
+    Ok(AssetCollection::from_loaded_parts(vec![file], resources))
 }
 
 fn load_exact_asset(
@@ -797,31 +902,9 @@ fn load_exact_asset(
         maximum_payload_bytes: 256 * 1024 * 1024,
         ..SimpleAssetReadLimits::default()
     };
-    let mut asset = read_audio_clip_asset_by_file_index(
-        collection,
-        reference.file_index,
-        reference.object_index,
-        limits,
-    )
-    .map_err(core_error)?;
-    if asset.payload != expected {
-        let key = match &reference.binding {
-            PayloadBinding::Inline { .. } => {
-                return Err(unsupported("inline AudioClip payload changed"));
-            }
-            PayloadBinding::BundleResource { key, .. } => key.as_str(),
-            PayloadBinding::External { source, .. } => source.as_str(),
-        };
-        let selected = collection
-            .resources()
-            .iter()
-            .find(|resource| resource.path == key)
-            .ok_or_else(|| approved_input("AudioClip selected resource disappeared"))?;
-        let scoped =
-            AssetCollection::from_loaded_parts(vec![loaded.clone()], vec![selected.clone()]);
-        asset = read_audio_clip_asset_by_file_index(&scoped, 0, reference.object_index, limits)
-            .map_err(core_error)?;
-    }
+    let scoped = exact_scoped_collection(collection, reference.file_index, &reference.binding)?;
+    let asset = read_audio_clip_asset_by_file_index(&scoped, 0, reference.object_index, limits)
+        .map_err(core_error)?;
     if asset.payload != expected
         || asset.path_id != reference.path_id
         || asset.name != reference.name
@@ -1132,7 +1215,513 @@ pub fn resolve_payload_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use unity_rs_core::audio::Fsb5VorbisStream;
+    use unity_rs_core::source::Source;
+
+    #[derive(Debug)]
+    struct CountedSource {
+        bytes: Vec<u8>,
+        reads: Arc<AtomicUsize>,
+    }
+    impl Source for CountedSource {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+        fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let start = offset as usize;
+            output.copy_from_slice(&self.bytes[start..start + output.len()]);
+            Ok(())
+        }
+    }
+
+    fn fixture_wav() -> Vec<u8> {
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&40_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&48_000_u32.to_le_bytes());
+        wav.extend_from_slice(&192_000_u32.to_le_bytes());
+        wav.extend_from_slice(&4_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4_u32.to_le_bytes());
+        wav.extend_from_slice(&[1, 2, 3, 4]);
+        wav
+    }
+
+    fn fixture_audio_object(source: &str, payload: &[u8]) -> Vec<u8> {
+        let mut object = Vec::new();
+        object.extend_from_slice(&5_i32.to_le_bytes());
+        object.extend_from_slice(b"theme");
+        while !object.len().is_multiple_of(4) {
+            object.push(0);
+        }
+        object.extend_from_slice(&0_i32.to_le_bytes());
+        object.extend_from_slice(&2_i32.to_le_bytes());
+        object.extend_from_slice(&48_000_i32.to_le_bytes());
+        object.extend_from_slice(&16_i32.to_le_bytes());
+        object.extend_from_slice(&0_f32.to_le_bytes());
+        object.push(0);
+        while !object.len().is_multiple_of(4) {
+            object.push(0);
+        }
+        object.extend_from_slice(&0_i32.to_le_bytes());
+        object.extend_from_slice(&[0_u8; 3]);
+        while !object.len().is_multiple_of(4) {
+            object.push(0);
+        }
+        object.extend_from_slice(&i32::try_from(source.len()).unwrap().to_le_bytes());
+        object.extend_from_slice(source.as_bytes());
+        if !source.is_empty() {
+            while !object.len().is_multiple_of(4) {
+                object.push(0);
+            }
+        }
+        object.extend_from_slice(&0_i64.to_le_bytes());
+        object.extend_from_slice(&(payload.len() as i64).to_le_bytes());
+        object.extend_from_slice(&1_i32.to_le_bytes());
+        if source.is_empty() {
+            object.extend_from_slice(payload);
+        }
+        object
+    }
+
+    #[test]
+    fn exact_scoped_adapter_read_never_touches_an_earlier_basename_collision() {
+        const CAB: &str = "0123456789abcdef0123456789abcdef";
+        let name = format!("CAB-{CAB}.resource");
+        let uri = format!("archive:/CAB-{CAB}/{name}");
+        let key = format!("owning.bundle::{name}");
+        let wav = fixture_wav();
+        let object = fixture_audio_object(&uri, &wav);
+        let file = SerializedFile::open(Region::from_bytes(fixture_asset(83, &object))).unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let wrong = Region::new(
+            Arc::new(CountedSource {
+                bytes: wav.clone(),
+                reads: reads.clone(),
+            }),
+            0,
+            wav.len() as u64,
+        )
+        .unwrap();
+        let collection = AssetCollection::from_loaded_parts(
+            vec![LoadedSerializedFile {
+                path: "owning.bundle::audio.assets".into(),
+                file,
+            }],
+            vec![
+                LoadedResource {
+                    path: format!("other.bundle::{name}"),
+                    region: wrong,
+                },
+                LoadedResource {
+                    path: key.clone(),
+                    region: Region::from_bytes(wav.clone()),
+                },
+            ],
+        );
+        let reference = AudioAssetRef {
+            bundle_path: "owning.bundle".into(),
+            file_index: 0,
+            object_index: 0,
+            path_id: 7,
+            name: "theme".into(),
+            container: None,
+            binding: PayloadBinding::BundleResource {
+                source: uri,
+                key,
+                offset: 0,
+                size: wav.len() as u64,
+            },
+            metadata: AudioMetadata {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                duration_seconds: 0.0,
+                compression_format: 1,
+                subsound_index: 0,
+            },
+            metadata_completeness: MetadataCompleteness::RequiresMeasurement,
+            predecode_frames: PredecodeFrameCount::Unavailable,
+            signature: CodecLayoutSignature {
+                codec: CodecKind::ExistingWave,
+                layout: PayloadLayout::BundleResource,
+                compression_format: 1,
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+            },
+        };
+        let _ = read_audio_clip_asset_by_file_index(
+            &collection,
+            0,
+            0,
+            SimpleAssetReadLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            reads.load(Ordering::SeqCst) > 0,
+            "fixture must expose pinned basename fallback"
+        );
+        reads.store(0, Ordering::SeqCst);
+        let asset = load_exact_asset(&collection, &reference).unwrap();
+        assert_eq!(asset.payload.read_to_vec(64).unwrap(), wav);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    fn fixture_session(
+        layout: PayloadLayout,
+    ) -> (UnitySession, tempfile::TempDir, tempfile::TempDir) {
+        use crate::{
+            config::InputEntry, hash::sha256_bytes, inventory::VerifiedInputFile,
+            paths::ValidatedAppPath,
+        };
+        let app_dir = tempfile::tempdir_in(".").unwrap();
+        let scratch = tempfile::tempdir_in(".").unwrap();
+        std::fs::write(app_dir.path().join("fixture.bundle"), b"snapshot").unwrap();
+        let app = ValidatedAppPath::new(app_dir.path()).unwrap();
+        let approved = VerifiedBundleInputs {
+            bundle: VerifiedInputFile::open(
+                &app,
+                &InputEntry {
+                    relative_path: "fixture.bundle".into(),
+                    size: 8,
+                    sha256: sha256_bytes(b"snapshot"),
+                },
+            )
+            .unwrap(),
+            resources: vec![],
+        };
+        let snapshots = approved
+            .snapshot_set_shared(&scratch.path().canonicalize().unwrap())
+            .unwrap();
+        let wav = fixture_wav();
+        const CAB: &str = "0123456789abcdef0123456789abcdef";
+        let source = match layout {
+            PayloadLayout::Inline => "".to_owned(),
+            PayloadLayout::BundleResource => format!("archive:/CAB-{CAB}/CAB-{CAB}.resource"),
+            PayloadLayout::External => "owned/path/shared.resS".into(),
+        };
+        let object = fixture_audio_object(&source, &wav);
+        let file = fixture_audio_file(&object, if source.is_empty() { wav.len() } else { 0 });
+        let files = vec![
+            LoadedSerializedFile {
+                path: "fixture.bundle::one.assets".into(),
+                file: file.clone(),
+            },
+            LoadedSerializedFile {
+                path: "fixture.bundle::two.assets".into(),
+                file,
+            },
+        ];
+        let resources = match layout {
+            PayloadLayout::Inline => vec![],
+            _ => {
+                let key = if layout == PayloadLayout::BundleResource {
+                    format!("fixture.bundle::CAB-{CAB}.resource")
+                } else {
+                    source.clone()
+                };
+                vec![
+                    LoadedResource {
+                        path: if layout == PayloadLayout::BundleResource {
+                            format!("other.bundle::CAB-{CAB}.resource")
+                        } else {
+                            "other/path/shared.resS".into()
+                        },
+                        region: Region::from_bytes(vec![9; wav.len()]),
+                    },
+                    LoadedResource {
+                        path: key,
+                        region: Region::from_bytes(wav.clone()),
+                    },
+                ]
+            }
+        };
+        let session = UnitySession {
+            collection: AssetCollection::from_loaded_parts(files, resources),
+            snapshots,
+            bundle_path: "fixture.bundle".into(),
+            approved_external: if layout == PayloadLayout::External {
+                vec![source]
+            } else {
+                vec![]
+            },
+            cached_audio_refs: None,
+            peak_live_buffer_bytes: 0,
+            bundle_opens: 1,
+        };
+        (session, app_dir, scratch)
+    }
+
+    #[test]
+    fn actual_bundle_session_streams_inline_external_and_bundle_resource_then_recovers() {
+        struct Interrupt;
+        impl Write for Interrupt {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("controlled interruption"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for layout in [
+            PayloadLayout::Inline,
+            PayloadLayout::External,
+            PayloadLayout::BundleResource,
+        ] {
+            let (mut session, _app, _scratch) = fixture_session(layout);
+            let refs = session.audio_refs().unwrap();
+            assert_eq!(refs.len(), 2);
+            assert!(
+                refs.iter()
+                    .all(|reference| reference.signature.layout == layout)
+            );
+            let first = &refs[0];
+            let second = &refs[1];
+            let mut wav = Vec::new();
+            let receipt = session
+                .stream_audio(first, &mut wav, &AudioLimits::default())
+                .unwrap();
+            assert_eq!(receipt.frame_count, 1);
+            assert_eq!(
+                receipt.frame_count_source,
+                FrameCountSource::ValidatedDecodedWav
+            );
+            assert_eq!(wav, fixture_wav());
+            assert_eq!(
+                session
+                    .stream_audio(first, &mut Interrupt, &AudioLimits::default())
+                    .unwrap_err()
+                    .unity_kind(),
+                Some(UnityErrorKind::Io)
+            );
+            let mut later = Vec::new();
+            session
+                .stream_audio(second, &mut later, &AudioLimits::default())
+                .unwrap();
+            assert_eq!(later, wav);
+            assert_eq!(session.metrics().bundle_opens, 1);
+        }
+    }
+
+    fn fixture_bundle(blocks: &[(u32, u16, Vec<u8>)], entries: &[(u64, u64, &str)]) -> Vec<u8> {
+        let mut info = vec![0_u8; 16];
+        info.extend_from_slice(&i32::try_from(blocks.len()).unwrap().to_be_bytes());
+        for (uncompressed, compression, data) in blocks {
+            info.extend_from_slice(&uncompressed.to_be_bytes());
+            info.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            info.extend_from_slice(&compression.to_be_bytes());
+        }
+        info.extend_from_slice(&i32::try_from(entries.len()).unwrap().to_be_bytes());
+        for (offset, size, name) in entries {
+            info.extend_from_slice(&i64::try_from(*offset).unwrap().to_be_bytes());
+            info.extend_from_slice(&i64::try_from(*size).unwrap().to_be_bytes());
+            info.extend_from_slice(&0_u32.to_be_bytes());
+            info.extend_from_slice(name.as_bytes());
+            info.push(0);
+        }
+        let mut bytes = b"UnityFS\0".to_vec();
+        bytes.extend_from_slice(&6_u32.to_be_bytes());
+        bytes.extend_from_slice(b"5.x.x\0");
+        bytes.extend_from_slice(b"6000.0.48f1\0");
+        let size_at = bytes.len();
+        bytes.extend_from_slice(&0_i64.to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(info.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&u32::try_from(info.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&0x40_u32.to_be_bytes());
+        bytes.extend_from_slice(&info);
+        for (_, _, data) in blocks {
+            bytes.extend_from_slice(data);
+        }
+        let size = i64::try_from(bytes.len()).unwrap();
+        bytes[size_at..size_at + 8].copy_from_slice(&size.to_be_bytes());
+        bytes
+    }
+
+    fn fixture_asset(class_id: i32, object: &[u8]) -> Vec<u8> {
+        let mut metadata = b"6000.0.48f1\0".to_vec();
+        metadata.extend_from_slice(&13_i32.to_le_bytes());
+        metadata.push(0);
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        metadata.extend_from_slice(&class_id.to_le_bytes());
+        metadata.push(0);
+        metadata.extend_from_slice(&(-1_i16).to_le_bytes());
+        metadata.extend_from_slice(&[0_u8; 16]);
+        metadata.extend_from_slice(&1_i32.to_le_bytes());
+        while !(48 + metadata.len()).is_multiple_of(4) {
+            metadata.push(0);
+        }
+        metadata.extend_from_slice(&7_i64.to_le_bytes());
+        metadata.extend_from_slice(&0_i64.to_le_bytes());
+        metadata.extend_from_slice(&u32::try_from(object.len()).unwrap().to_le_bytes());
+        metadata.extend_from_slice(&0_i32.to_le_bytes());
+        for _ in 0..3 {
+            metadata.extend_from_slice(&0_i32.to_le_bytes());
+        }
+        metadata.push(0);
+        let metadata_size = u32::try_from(metadata.len()).unwrap();
+        let data_offset = (48 + u64::from(metadata_size)).div_ceil(16) * 16;
+        let file_size = data_offset + object.len() as u64;
+        let mut bytes = vec![0_u8; 48];
+        bytes[8..12].copy_from_slice(&22_u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&metadata_size.to_be_bytes());
+        bytes[24..32].copy_from_slice(&i64::try_from(file_size).unwrap().to_be_bytes());
+        bytes[32..40].copy_from_slice(&i64::try_from(data_offset).unwrap().to_be_bytes());
+        bytes.extend_from_slice(&metadata);
+        bytes.resize(data_offset as usize, 0);
+        bytes.extend_from_slice(object);
+        bytes
+    }
+
+    fn fixture_type_node(
+        type_name: &str,
+        field_name: &str,
+        level: u32,
+        align: bool,
+    ) -> unity_rs_core::serialized::TypeTreeNode {
+        unity_rs_core::serialized::TypeTreeNode {
+            type_name: type_name.into(),
+            field_name: field_name.into(),
+            byte_size: -1,
+            index: 0,
+            type_flags: 0,
+            version: 1,
+            meta_flags: if align { 0x4000 } else { 0 },
+            level,
+            type_string_offset: None,
+            name_string_offset: None,
+            reference_type_hash: 0,
+        }
+    }
+
+    fn fixture_audio_file(object: &[u8], inline_bytes: usize) -> SerializedFile {
+        use unity_rs_core::serialized::TypeTree;
+        let mut file = SerializedFile::open(Region::from_bytes(fixture_asset(83, object))).unwrap();
+        let node = fixture_type_node;
+        let mut nodes = vec![
+            node("AudioClip", "Base", 0, false),
+            node("string", "m_Name", 1, true),
+            node("Array", "Array", 2, true),
+            node("int", "size", 3, false),
+            unity_rs_core::serialized::TypeTreeNode {
+                byte_size: 1,
+                ..node("char", "data", 3, false)
+            },
+            node("int", "m_LoadType", 1, false),
+            node("int", "m_Channels", 1, false),
+            node("int", "m_Frequency", 1, false),
+            node("int", "m_BitsPerSample", 1, false),
+            node("float", "m_Length", 1, false),
+            node("bool", "m_IsTrackerFormat", 1, false),
+            node("bool", "m_Ambisonic", 1, true),
+            node("int", "m_SubsoundIndex", 1, false),
+            node("bool", "m_PreloadAudioData", 1, false),
+            node("bool", "m_LoadInBackground", 1, false),
+            node("bool", "m_Legacy3D", 1, true),
+            node("StreamingInfo", "m_Resource", 1, false),
+            node("string", "m_Source", 2, true),
+            node("Array", "Array", 3, true),
+            node("int", "size", 4, false),
+            unity_rs_core::serialized::TypeTreeNode {
+                byte_size: 1,
+                ..node("char", "data", 4, false)
+            },
+            node("SInt64", "m_Offset", 2, false),
+            node("SInt64", "m_Size", 2, false),
+            node("int", "m_CompressionFormat", 1, false),
+        ];
+        for index in 0..inline_bytes {
+            nodes.push(node("UInt8", &format!("m_Inline{index}"), 1, false));
+        }
+        file.types[0].type_tree = Some(TypeTree {
+            nodes,
+            string_buffer: Vec::new(),
+        });
+        file.type_tree_enabled = true;
+        file
+    }
+
+    fn fixture_file(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn unreferenced_storage_blocks_count_toward_the_expanded_ceiling() {
+        let blocks: Vec<_> = (0..5)
+            .map(|_| (512 * 1024 * 1024, 2_u16, vec![0_u8]))
+            .collect();
+        let file = fixture_file(&fixture_bundle(&blocks, &[(0, 0, "empty")]));
+        let error = open_pinned_bundle(file.path(), "fixture.bundle", &[]).unwrap_err();
+        assert_eq!(error.unity_kind(), Some(UnityErrorKind::ApprovedInput));
+    }
+
+    #[test]
+    fn metadata_and_object_budgets_are_aggregate_across_serialized_entries() {
+        let asset = fixture_asset(9999, b"x");
+        let mut data = asset.clone();
+        data.extend_from_slice(&asset);
+        let bundle = fixture_bundle(
+            &[(data.len() as u32, 0, data)],
+            &[
+                (0, asset.len() as u64, "one.assets"),
+                (asset.len() as u64, asset.len() as u64, "two.assets"),
+            ],
+        );
+        let file = fixture_file(&bundle);
+        let metadata_bytes = u64::from(u32::from_be_bytes(asset[20..24].try_into().unwrap()));
+        let object_error = open_pinned_bundle_with_budgets(
+            file.path(),
+            "fixture.bundle",
+            &[],
+            ParseBudgets {
+                expanded_bytes: 2 * 1024 * 1024 * 1024,
+                metadata_bytes: 256 * 1024 * 1024,
+                objects: 1,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            object_error.unity_kind(),
+            Some(UnityErrorKind::ApprovedInput)
+        );
+        let metadata_error = open_pinned_bundle_with_budgets(
+            file.path(),
+            "fixture.bundle",
+            &[],
+            ParseBudgets {
+                expanded_bytes: 2 * 1024 * 1024 * 1024,
+                metadata_bytes: metadata_bytes + 1,
+                objects: 200_000,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            metadata_error.unity_kind(),
+            Some(UnityErrorKind::ApprovedInput)
+        );
+    }
+
+    #[test]
+    fn counted_unityfs_open_records_each_real_invocation() {
+        let data = b"data".to_vec();
+        let region = Region::from_bytes(fixture_bundle(&[(4, 0, data)], &[(0, 4, "a.resource")]));
+        let mut opens = 0;
+        for _ in 0..2 {
+            counted_unityfs_open(&region, BundleParseLimits::default(), &mut opens).unwrap();
+        }
+        assert_eq!(opens, 2);
+    }
 
     fn vorbis(frames: u64) -> DirectWavKind {
         DirectWavKind::Fsb5Vorbis(Fsb5VorbisStream {

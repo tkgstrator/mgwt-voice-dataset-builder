@@ -178,3 +178,43 @@ fn backend_rejects_unity_data_over_the_approved_bundle_limit_before_parsing() {
         Some(mgwt_voice_dataset_builder::error::UnityErrorKind::ApprovedInput)
     );
 }
+
+#[test]
+fn raised_bundle_limit_cannot_exceed_the_fixed_512_mib_ceiling() {
+    let reader = UnityReader::with_bundle_limit(".", u64::MAX);
+    assert_eq!(reader.maximum_bundle_bytes(), 512 * 1024 * 1024);
+}
+
+#[test]
+fn snapshot_drift_crossing_unity_entry_is_typed_approved_input() {
+    use mgwt_voice_dataset_builder::{
+        config::InputEntry,
+        error::{ExitClass, UnityErrorKind},
+        hash::sha256_bytes,
+        inventory::{VerifiedBundleInputs, VerifiedInputFile},
+        paths::ValidatedAppPath,
+    };
+    let app_dir = tempfile::tempdir_in(".").unwrap();
+    let bundle_path = app_dir.path().join("bundle");
+    std::fs::write(&bundle_path, b"before").unwrap();
+    let app = ValidatedAppPath::new(app_dir.path()).unwrap();
+    let verified = VerifiedInputFile::open(
+        &app,
+        &InputEntry {
+            relative_path: "bundle".into(),
+            size: 6,
+            sha256: sha256_bytes(b"before"),
+        },
+    )
+    .unwrap();
+    std::fs::write(&bundle_path, b"after!").unwrap();
+    let scratch = tempfile::tempdir_in(".").unwrap();
+    let error = UnityReader::new(scratch.path())
+        .open_bundle(&VerifiedBundleInputs {
+            bundle: verified,
+            resources: vec![],
+        })
+        .unwrap_err();
+    assert_eq!(error.unity_kind(), Some(UnityErrorKind::ApprovedInput));
+    assert_eq!(error.exit_class(), ExitClass::Validation);
+}
