@@ -3,3 +3,4 @@
 *.toml text eol=lf
 *.md text eol=lf
 *.yml text eol=lf
+/config/*.json text eol=lf
