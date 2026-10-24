@@ -2,8 +2,10 @@
 //! Guarded CLI foundation for a locally authorized voice dataset build.
 
 pub mod audio;
+pub mod build;
 pub mod cli;
 pub mod config;
+pub mod delivery;
 pub mod error;
 pub mod hash;
 pub mod inventory;
@@ -11,6 +13,7 @@ pub mod matching;
 pub mod model;
 pub mod naninovel;
 pub mod normalize;
+pub mod parquet_writer;
 pub mod paths;
 pub mod resolution;
 pub mod speaker;
@@ -38,19 +41,22 @@ pub fn run(cli: Cli) -> Result<RunOutcome, AppError> {
             inventory::write_inspection_reports(&output, &inspection)?;
             Ok(RunOutcome::Complete)
         }
-        Command::Build { app, output } => {
+        Command::Build {
+            app,
+            output,
+            shard_audio_mib,
+        } => {
             validate_separation(&app, &output)?;
             let app = ValidatedAppPath::new(&app)?;
-            let _output = ValidatedOutputPath::new(&output, &app)?;
-            Err(AppError::processing(
-                "command pipeline is not implemented yet",
-            ))
+            let output = ValidatedOutputPath::new(&output, &app)?;
+            build::build_app(&app, &output, shard_audio_mib)?;
+            Ok(RunOutcome::Complete)
         }
         Command::Verify { input } => {
-            let _input = ValidatedAppPath::new(&input)?;
-            Err(AppError::processing(
-                "verification pipeline is not implemented yet",
-            ))
+            let input = ValidatedAppPath::new(&input)?;
+            delivery::verify_dataset(input.absolute())
+                .map_err(|e| AppError::processing(format!("dataset verification: {e}")))?;
+            Ok(RunOutcome::Complete)
         }
     }
 }

@@ -51,7 +51,11 @@ fn case_alias_of_app_ancestor_is_rejected_by_bound_identity() {
     let output = alias.join("nested/dataset");
     assert!(validate_separation(&app, &output).is_ok());
     let result = run(Cli {
-        command: Command::Build { app, output },
+        command: Command::Build {
+            app,
+            output,
+            shard_audio_mib: 500,
+        },
     });
     assert_eq!(result.unwrap_err().exit_class(), ExitClass::Validation);
 }

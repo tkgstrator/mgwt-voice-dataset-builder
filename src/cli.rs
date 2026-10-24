@@ -28,6 +28,8 @@ pub enum Command {
         app: PathBuf,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long, default_value_t = 500, value_parser = clap::value_parser!(u64).range(1..=1024))]
+        shard_audio_mib: u64,
     },
     /// Verify a completed local dataset.
     Verify {

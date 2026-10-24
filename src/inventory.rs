@@ -99,7 +99,9 @@ fn validate_scratch_outside_app(root: &OwnedFd, scratch: &Path) -> Result<OwnedF
     }
     Ok(current)
 }
-fn requested_parent_matches(output: &crate::paths::ValidatedOutputPath) -> Result<(), AppError> {
+pub(crate) fn requested_parent_matches(
+    output: &crate::paths::ValidatedOutputPath,
+) -> Result<(), AppError> {
     let mut current = fs::openat(fs::CWD, "/", DIR_FLAGS, Mode::empty())
         .map_err(|e| invalid(format!("open output filesystem root: {e}")))?;
     for component in output.requested_parent().components() {

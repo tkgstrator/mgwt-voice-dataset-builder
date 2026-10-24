@@ -29,3 +29,14 @@ fn error_classes_have_stable_process_codes() {
     assert_eq!(ExitClass::Processing.code(), 1);
     assert_eq!(ExitClass::Validation.code(), 2);
 }
+
+#[test]
+fn build_accepts_explicit_shard_audio_target() {
+    let output = binary().args(["build", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("--shard-audio-mib")
+    );
+}

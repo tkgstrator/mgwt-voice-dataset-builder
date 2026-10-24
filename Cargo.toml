@@ -7,13 +7,17 @@ license = "MIT"
 description = "Native Rust foundation for a locally authorized voice dataset builder"
 
 [dependencies]
+arrow-array = "=58.1.0"
+arrow-schema = "=58.1.0"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4.3"
+parquet = { version = "=58.1.0", default-features = false, features = ["arrow", "zstd"] }
 regex = "1.13.1"
 rustix = { version = "=1.1.5", features = ["fs"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+tempfile = "=3.27.0"
 unicode-general-category = "1.1.0"
 unicode-normalization = "0.1.26"
 unity-rs-core = { git = "https://github.com/seiunx-dev/unity-rs.git", rev = "b3e509ed09fe6ff3a897d04ddb75eb5214482265" }
