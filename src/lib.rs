@@ -12,6 +12,7 @@ pub mod model;
 pub mod naninovel;
 pub mod normalize;
 pub mod paths;
+pub mod resolution;
 pub mod speaker;
 pub mod unity;
 
