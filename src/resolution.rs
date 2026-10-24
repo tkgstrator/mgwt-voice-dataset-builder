@@ -556,43 +556,44 @@ where
             bundles.push(bundle);
             remaining = rest;
         }
-        let disk = Mutex::new(DiskGate {
-            check: &mut check_disk,
-            staged: 0,
-            reserved: 0,
-        });
-        let files = Mutex::new(&mut owned);
-        for batch in bundles.chunks_mut(effective_bundle_workers(plan, workers)) {
-            let results = thread::scope(|scope| {
-                let mut handles = Vec::new();
-                for bundle in batch.iter_mut() {
-                    let chunk = &mut **bundle;
-                    let disk = &disk;
-                    let files = &files;
-                    handles.push(scope.spawn(move || {
-                        stage_bundle(chunk, backend, approved, staging, limits, disk, files)
-                    }));
-                }
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle
-                            .join()
-                            .unwrap_or_else(|_| Err(fatal("bundle staging worker panicked")))
-                    })
-                    .collect::<Vec<_>>()
+        {
+            let disk = Mutex::new(DiskGate {
+                check: &mut check_disk,
+                staged: 0,
+                reserved: 0,
             });
-            // All workers are joined before selecting the first error in bundle order.
-            // This also leaves centralized OwnedFiles cleanup safe on interruption.
-            let mut batch_peak = 0usize;
-            for result in results {
-                batch_peak = batch_peak
-                    .checked_add(result?)
-                    .ok_or_else(|| fatal("parallel live-buffer accounting overflow"))?;
+            let files = Mutex::new(&mut owned);
+            for batch in bundles.chunks_mut(effective_bundle_workers(plan, workers)) {
+                let results = thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for bundle in batch.iter_mut() {
+                        let chunk = &mut **bundle;
+                        let disk = &disk;
+                        let files = &files;
+                        handles.push(scope.spawn(move || {
+                            stage_bundle(chunk, backend, approved, staging, limits, disk, files)
+                        }));
+                    }
+                    handles
+                        .into_iter()
+                        .map(|handle| {
+                            handle
+                                .join()
+                                .unwrap_or_else(|_| Err(fatal("bundle staging worker panicked")))
+                        })
+                        .collect::<Vec<_>>()
+                });
+                // All workers are joined before selecting the first error in bundle order.
+                // This also leaves centralized OwnedFiles cleanup safe on interruption.
+                let mut batch_peak = 0usize;
+                for result in results {
+                    batch_peak = batch_peak
+                        .checked_add(result?)
+                        .ok_or_else(|| fatal("parallel live-buffer accounting overflow"))?;
+                }
+                peak = peak.max(batch_peak);
             }
-            peak = peak.max(batch_peak);
         }
-        drop(files);
         for w in &work {
             if w.staged.is_some() {
                 health

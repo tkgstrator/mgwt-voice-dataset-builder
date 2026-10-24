@@ -13,7 +13,9 @@ use std::{
     io::{Read, Seek, SeekFrom},
     os::fd::{AsFd, OwnedFd},
     path::{Component, Path},
+    sync::Arc,
 };
+use unity_rs_core::source::{Region, Source};
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
@@ -61,12 +63,17 @@ fn identity(fd: impl AsFd) -> Result<(u64, u64, u64, i64, i64), AppError> {
     if !fs::FileType::from_raw_mode(stat.st_mode).is_file() {
         return Err(invalid("approved input is not a regular file"));
     }
+    #[cfg(target_os = "linux")]
+    let mtime_nsec = i64::try_from(stat.st_mtime_nsec)
+        .map_err(|_| invalid("input modification timestamp is out of range"))?;
+    #[cfg(not(target_os = "linux"))]
+    let mtime_nsec = stat.st_mtime_nsec;
     Ok((
         stat.st_dev as u64,
         stat.st_ino as u64,
         stat.st_size as u64,
         stat.st_mtime,
-        stat.st_mtime_nsec,
+        mtime_nsec,
     ))
 }
 fn validate_scratch_outside_app(root: &OwnedFd, scratch: &Path) -> Result<OwnedFd, AppError> {
@@ -376,6 +383,23 @@ pub struct VerifiedSnapshotSet {
     reserved_bytes: u64,
 }
 impl VerifiedSnapshotSet {
+    /// Pass verified byte regions to a parser without reopening snapshot paths.
+    pub(crate) fn with_parser_regions<T>(
+        &self,
+        open: impl FnOnce(&Region, &[(String, Region)]) -> Result<T, AppError>,
+    ) -> Result<T, AppError> {
+        self.verify_all()?;
+        let bundle = self.bundle.region()?;
+        let resources = self
+            .resources
+            .iter()
+            .map(|resource| Ok((resource.relative_path.clone(), resource.region()?)))
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let result = open(&bundle, &resources);
+        self.verify_all()?;
+        result
+    }
+
     /// Use only descriptor-backed, owned snapshot paths while retaining this set.
     pub fn with_parser_paths<T>(
         &self,
@@ -651,7 +675,7 @@ impl Drop for OwnedSnapshotDir {
     }
 }
 
-/// A run-owned, content-addressed, read-only copy for path-only parser dependencies.
+/// A run-owned, content-addressed, read-only copy for parser dependencies.
 /// The source descriptor is never exposed to a parser.
 #[derive(Debug)]
 pub struct VerifiedSnapshot {
@@ -680,6 +704,48 @@ impl<P> VerifiedParserSession<P> {
         result
     }
 }
+
+struct SnapshotFileSource {
+    file: File,
+    length: u64,
+}
+
+impl Source for SnapshotFileSource {
+    fn len(&self) -> u64 {
+        self.length
+    }
+
+    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self.file.read_exact_at(output, offset)
+        }
+        #[cfg(windows)]
+        {
+            use std::{io, os::windows::fs::FileExt};
+            let mut filled = 0;
+            while filled < output.len() {
+                let at = offset.checked_add(filled as u64).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "snapshot offset overflow")
+                })?;
+                match self.file.seek_read(&mut output[filled..], at) {
+                    Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+                    Ok(read) => filled += read,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (offset, output);
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+    }
+}
+
 impl VerifiedSnapshot {
     pub fn relative_path(&self) -> &str {
         &self.relative_path
@@ -817,6 +883,22 @@ impl VerifiedSnapshot {
             return Err(invalid("snapshot bytes changed"));
         }
         Ok(())
+    }
+
+    fn region(&self) -> Result<Region, AppError> {
+        let file = self
+            .file
+            .try_clone()
+            .map_err(|error| invalid(format!("clone verified snapshot handle: {error}")))?;
+        Region::new(
+            Arc::new(SnapshotFileSource {
+                file,
+                length: self.size,
+            }),
+            0,
+            self.size,
+        )
+        .map_err(|error| invalid(format!("bind snapshot region: {error}")))
     }
 
     /// Read the verified copy through a bounded-lifetime reader for dependency discovery.

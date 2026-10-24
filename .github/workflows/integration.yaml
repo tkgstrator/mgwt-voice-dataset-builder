@@ -1,0 +1,83 @@
+name: Integration
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            runner_os: Linux
+            runner_arch: X64
+            rust_host: x86_64-unknown-linux-gnu
+            executable: mgwt-voice-dataset-builder
+          - os: ubuntu-24.04-arm
+            runner_os: Linux
+            runner_arch: ARM64
+            rust_host: aarch64-unknown-linux-gnu
+            executable: mgwt-voice-dataset-builder
+          - os: macos-15-intel
+            runner_os: macOS
+            runner_arch: X64
+            rust_host: x86_64-apple-darwin
+            executable: mgwt-voice-dataset-builder
+          - os: macos-15
+            runner_os: macOS
+            runner_arch: ARM64
+            rust_host: aarch64-apple-darwin
+            executable: mgwt-voice-dataset-builder
+          - os: windows-2025
+            runner_os: Windows
+            runner_arch: X64
+            rust_host: x86_64-pc-windows-msvc
+            executable: mgwt-voice-dataset-builder.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy
+      - name: Verify native runner and toolchain
+        shell: bash
+        env:
+          EXPECTED_OS: ${{ matrix.runner_os }}
+          EXPECTED_ARCH: ${{ matrix.runner_arch }}
+          EXPECTED_HOST: ${{ matrix.rust_host }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = "$EXPECTED_OS"
+          test "$RUNNER_ARCH" = "$EXPECTED_ARCH"
+          rustc -vV
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$EXPECTED_HOST"
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Synthetic tests
+        run: cargo test --workspace --all-targets --locked
+      - name: Documentation
+        run: cargo doc --workspace --no-deps --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Smoke test executable
+        shell: bash
+        env:
+          EXECUTABLE: ${{ matrix.executable }}
+        run: ./target/release/"$EXECUTABLE" --help
+      - name: Release archive validator tests
+        if: matrix.os == 'ubuntu-24.04'
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v

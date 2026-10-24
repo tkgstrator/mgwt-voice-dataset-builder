@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use mgwt_voice_dataset_builder::{
     config::InputEntry,
     inventory::{VerifiedInputFile, inventory_entries},

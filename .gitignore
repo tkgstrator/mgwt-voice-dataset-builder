@@ -8,5 +8,7 @@ staging/
 evidence/
 logs/
 *.log
+__pycache__/
+*.py[cod]
 local/
 tmp/

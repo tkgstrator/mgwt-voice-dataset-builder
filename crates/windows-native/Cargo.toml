@@ -1,0 +1,15 @@
+[package]
+name = "mgwt-windows-native"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Small audited Windows filesystem operations for mgwt-voice-dataset-builder"
+
+[dependencies]
+cap-std = "=4.0.3"
+fs_at = "=0.2.1"
+windows-sys = { version = "=0.59.0", features = ["Wdk_Storage_FileSystem", "Wdk_System_SystemServices", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_WindowsProgramming"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

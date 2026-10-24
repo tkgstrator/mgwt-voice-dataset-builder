@@ -8,6 +8,10 @@ pub mod config;
 pub mod delivery;
 pub mod error;
 pub mod hash;
+#[cfg(unix)]
+pub mod inventory;
+#[cfg(windows)]
+#[path = "inventory_windows.rs"]
 pub mod inventory;
 pub mod matching;
 pub mod model;
@@ -60,6 +64,10 @@ pub fn run(cli: Cli) -> Result<RunOutcome, AppError> {
         }
         Command::Verify { input } => {
             let input = ValidatedAppPath::new(&input)?;
+            #[cfg(windows)]
+            let _pin =
+                mgwt_windows_native::pin_requested_parent_path(input.absolute(), input.dir())
+                    .map_err(|e| AppError::validation(format!("pin dataset input path: {e}")))?;
             delivery::verify_dataset(input.absolute())
                 .map_err(|e| AppError::processing(format!("dataset verification: {e}")))?;
             Ok(RunOutcome::Complete)

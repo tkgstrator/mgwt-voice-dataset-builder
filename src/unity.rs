@@ -321,8 +321,8 @@ impl UnityBackend for UnityReader {
         let snapshots = snapshot_result(approved.snapshot_set_shared(&scratch))?;
         let bundle_path = approved.bundle.relative_path.clone();
         let (collection, bundle_opens) =
-            snapshot_result(snapshots.with_parser_paths(|bundle_snapshot, external| {
-                open_pinned_bundle(bundle_snapshot, &bundle_path, external)
+            snapshot_result(snapshots.with_parser_regions(|bundle_snapshot, external| {
+                open_pinned_bundle_regions(bundle_snapshot, &bundle_path, external)
             }))?;
         Ok(UnitySession {
             collection,
@@ -401,6 +401,7 @@ fn counted_unityfs_open(
     UnityFsBundle::open_with_limits(region, limits).map_err(core_error)
 }
 
+#[cfg(test)]
 fn open_pinned_bundle(
     path: &Path,
     bundle_path: &str,
@@ -409,6 +410,7 @@ fn open_pinned_bundle(
     open_pinned_bundle_with_budgets(path, bundle_path, external, ParseBudgets::default())
 }
 
+#[cfg(test)]
 fn open_pinned_bundle_with_budgets(
     path: &Path,
     bundle_path: &str,
@@ -416,6 +418,27 @@ fn open_pinned_bundle_with_budgets(
     budgets: ParseBudgets,
 ) -> Result<(AssetCollection, u64), AppError> {
     let region = Region::from_file(path).map_err(core_error)?;
+    let resources = external
+        .iter()
+        .map(|(label, path)| Ok((label.clone(), Region::from_file(path).map_err(core_error)?)))
+        .collect::<Result<Vec<_>, AppError>>()?;
+    open_pinned_bundle_regions_with_budgets(&region, bundle_path, &resources, budgets)
+}
+
+fn open_pinned_bundle_regions(
+    region: &Region,
+    bundle_path: &str,
+    external: &[(String, Region)],
+) -> Result<(AssetCollection, u64), AppError> {
+    open_pinned_bundle_regions_with_budgets(region, bundle_path, external, ParseBudgets::default())
+}
+
+fn open_pinned_bundle_regions_with_budgets(
+    region: &Region,
+    bundle_path: &str,
+    external: &[(String, Region)],
+    budgets: ParseBudgets,
+) -> Result<(AssetCollection, u64), AppError> {
     let limits = BundleParseLimits {
         max_entries: 200_000,
         max_blocks: 200_000,
@@ -424,7 +447,7 @@ fn open_pinned_bundle_with_budgets(
         ..BundleParseLimits::default()
     };
     let mut bundle_opens = 0;
-    let bundle = counted_unityfs_open(&region, limits, &mut bundle_opens)?;
+    let bundle = counted_unityfs_open(region, limits, &mut bundle_opens)?;
     let block_expanded = bundle
         .blocks
         .iter()
@@ -508,10 +531,10 @@ fn open_pinned_bundle_with_budgets(
             }
         }
     }
-    for (label, path) in external {
+    for (label, region) in external {
         resources.push(LoadedResource {
             path: label.clone(),
-            region: Region::from_file(path).map_err(core_error)?,
+            region: region.clone(),
         });
     }
     let mut collection = AssetCollection::from_loaded_parts(files, resources);
@@ -1546,6 +1569,7 @@ mod tests {
         session.finish().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn session_finish_detects_owned_snapshot_mutation() {
         use std::os::unix::fs::PermissionsExt;
@@ -1725,6 +1749,64 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), bytes).unwrap();
         file
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parser_region_keeps_verified_bytes_after_snapshot_name_replacement() {
+        use crate::{
+            config::InputEntry, hash::sha256_bytes, inventory::VerifiedInputFile,
+            paths::ValidatedAppPath,
+        };
+
+        let asset = fixture_asset(9999, b"x");
+        let bundle = fixture_bundle(
+            &[(asset.len() as u32, 0, asset.clone())],
+            &[(0, asset.len() as u64, "one.assets")],
+        );
+        let app_dir = tempfile::tempdir_in(".").unwrap();
+        let scratch = tempfile::tempdir_in(".").unwrap();
+        std::fs::write(app_dir.path().join("fixture.bundle"), &bundle).unwrap();
+        let app = ValidatedAppPath::new(app_dir.path()).unwrap();
+        let approved = VerifiedBundleInputs {
+            bundle: VerifiedInputFile::open(
+                &app,
+                &InputEntry {
+                    relative_path: "fixture.bundle".into(),
+                    size: bundle.len() as u64,
+                    sha256: sha256_bytes(&bundle),
+                },
+            )
+            .unwrap(),
+            resources: vec![],
+        };
+        let snapshots = approved.snapshot_set_shared(scratch.path()).unwrap();
+        let stage = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let snapshot = std::fs::read_dir(stage)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut parsed_original = false;
+        let result = snapshots.with_parser_regions(|region, resources| {
+            std::fs::rename(&snapshot, app_dir.path().join("moved.bundle")).unwrap();
+            std::fs::write(&snapshot, b"replacement").unwrap();
+            let (collection, _) = open_pinned_bundle_regions(region, "fixture.bundle", resources)?;
+            assert_eq!(collection.serialized_files().len(), 1);
+            parsed_original = true;
+            Ok(())
+        });
+        assert!(parsed_original);
+        assert!(
+            result.is_err(),
+            "post-parse snapshot path drift must be rejected"
+        );
     }
 
     #[test]

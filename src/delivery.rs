@@ -7,6 +7,7 @@ use std::path::Path;
 
 use arrow_array::{Array, BinaryArray, StringArray, StructArray};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+#[cfg(unix)]
 use rustix::fs::{RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -462,7 +463,39 @@ fn verify_dataset_checked(
     Ok(report)
 }
 
-/// Write into a private sibling directory, read back the complete dataset,
+#[cfg(windows)]
+struct WindowsDatasetStage(Option<mgwt_windows_native::StageGuard>);
+
+#[cfg(windows)]
+impl WindowsDatasetStage {
+    fn path(&self) -> &Path {
+        self.0.as_ref().expect("stage is live").path()
+    }
+
+    fn promote(mut self, destination: &std::ffi::OsStr) -> io::Result<()> {
+        let stage = self.0.take().expect("stage is live");
+        let path = stage.path().to_path_buf();
+        let result = stage.promote(destination);
+        if result.is_err() {
+            eprintln!("dataset stage retained for inspection: {}", path.display());
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsDatasetStage {
+    fn drop(&mut self) {
+        if let Some(stage) = &self.0 {
+            eprintln!(
+                "dataset stage retained for inspection: {}",
+                stage.path().display()
+            );
+        }
+    }
+}
+
+/// Write into an owned sibling directory, read back the complete dataset,
 /// recheck approved input, then publish through the bound parent without clobbering.
 pub fn build_from_validated<R, C, D, I>(
     output: &crate::paths::ValidatedOutputPath,
@@ -484,10 +517,40 @@ where
     let processing = |error: io::Error| AppError::processing(format!("dataset delivery: {error}"));
     check_cancel()?;
     requested_parent_matches(output)?;
+    #[cfg(windows)]
+    let _parent_pin =
+        mgwt_windows_native::pin_requested_parent_path(output.requested_parent(), output.parent())
+            .map_err(processing)?;
+    #[cfg(unix)]
     let stage = tempfile::Builder::new()
         .prefix(".mgwt-stage-")
         .tempdir_in(output.requested_parent())
         .map_err(processing)?;
+    #[cfg(windows)]
+    let stage = {
+        let mut created = None;
+        for _ in 0..8 {
+            let mut random = [0u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|e| AppError::processing(format!("generate dataset stage name: {e}")))?;
+            let leaf = format!(".mgwt-stage-{}", hex::encode(random));
+            match mgwt_windows_native::create_pinned_stage(
+                output.parent(),
+                std::ffi::OsStr::new(&leaf),
+            ) {
+                Ok(stage) => {
+                    created = Some(stage);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(processing(error)),
+            }
+        }
+        WindowsDatasetStage(Some(created.ok_or_else(|| {
+            AppError::processing("could not create a unique dataset stage")
+        })?))
+    };
+    #[cfg(unix)]
     let stage_leaf = stage
         .path()
         .file_name()
@@ -516,14 +579,22 @@ where
     before_promote()?;
     check_cancel()?;
     requested_parent_matches(output)?;
-    renameat_with(
-        output.parent(),
-        stage_leaf,
-        output.parent(),
-        output.leaf(),
-        RenameFlags::NOREPLACE,
-    )
-    .map_err(|e| AppError::validation(format!("publish dataset without clobber: {e}")))?;
+    #[cfg(unix)]
+    {
+        renameat_with(
+            output.parent(),
+            stage_leaf,
+            output.parent(),
+            output.leaf(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|e| AppError::validation(format!("publish dataset without clobber: {e}")))?;
+        let _ = stage.keep();
+    }
+    #[cfg(windows)]
+    stage
+        .promote(output.leaf())
+        .map_err(|e| AppError::validation(format!("publish dataset without clobber: {e}")))?;
     Ok(report)
 }
 
@@ -599,6 +670,7 @@ mod tests {
         assert_eq!(verify_dataset(&output).unwrap(), report);
         assert!(ValidatedOutputPath::new(&output, &app).is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn failed_final_check_removes_stage_and_leaves_final_absent() {
         let tmp = tempfile::tempdir_in(".").unwrap();
@@ -621,6 +693,7 @@ mod tests {
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn injected_interrupt_after_staging_removes_owned_directory() {
         let tmp = tempfile::tempdir_in(".").unwrap();
@@ -652,5 +725,30 @@ mod tests {
         assert!(error.to_string().contains("build interrupted"));
         assert!(!output.exists());
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_publication_keeps_a_destination_created_during_build() {
+        let tmp = tempfile::tempdir_in(".").unwrap();
+        let app_path = tmp.path().join("app");
+        fs::create_dir(&app_path).unwrap();
+        let app = ValidatedAppPath::new(&app_path).unwrap();
+        let output = tmp.path().join("dataset");
+        let bound = ValidatedOutputPath::new(&output, &app).unwrap();
+        let result = build_from_validated(
+            &bound,
+            500 * 1024 * 1024,
+            prepare,
+            || {
+                fs::create_dir(&output).unwrap();
+                fs::write(output.join("marker"), b"keep").unwrap();
+                Ok(())
+            },
+            |_| Ok(()),
+            || Ok(()),
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(output.join("marker")).unwrap(), b"keep");
     }
 }

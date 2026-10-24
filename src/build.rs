@@ -14,6 +14,8 @@ use crate::{
     unity::{BundleSession, UnityBackend, UnityReader},
 };
 use serde_json::{Value, json};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -28,16 +30,22 @@ const MAX_SINGLE_WAV: u64 = 256 * 1024 * 1024;
 
 struct BuildInterruption {
     raised: Arc<AtomicBool>,
+    #[cfg(unix)]
     registrations: [signal_hook::SigId; 2],
 }
 
 impl BuildInterruption {
     fn new() -> Result<Self, AppError> {
-        let raised = Arc::new(AtomicBool::new(false));
-        let first = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&raised))
-            .map_err(|e| AppError::processing(format!("install interrupt handler: {e}")))?;
-        let second =
-            match signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&raised)) {
+        #[cfg(unix)]
+        {
+            let raised = Arc::new(AtomicBool::new(false));
+            let first =
+                signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&raised))
+                    .map_err(|e| AppError::processing(format!("install interrupt handler: {e}")))?;
+            let second = match signal_hook::flag::register(
+                signal_hook::consts::SIGTERM,
+                Arc::clone(&raised),
+            ) {
                 Ok(id) => id,
                 Err(e) => {
                     signal_hook::low_level::unregister(first);
@@ -46,10 +54,28 @@ impl BuildInterruption {
                     )));
                 }
             };
-        Ok(Self {
-            raised,
-            registrations: [first, second],
-        })
+            Ok(Self {
+                raised,
+                registrations: [first, second],
+            })
+        }
+        #[cfg(windows)]
+        {
+            static HANDLER: OnceLock<Result<Arc<AtomicBool>, String>> = OnceLock::new();
+            let raised = HANDLER
+                .get_or_init(|| {
+                    let raised = Arc::new(AtomicBool::new(false));
+                    let flag = Arc::clone(&raised);
+                    ctrlc::set_handler(move || flag.store(true, Ordering::SeqCst))
+                        .map_err(|e| e.to_string())?;
+                    Ok(raised)
+                })
+                .as_ref()
+                .map_err(|e| AppError::processing(format!("install interrupt handler: {e}")))?;
+            Ok(Self {
+                raised: Arc::clone(raised),
+            })
+        }
     }
 
     fn check(&self) -> Result<(), AppError> {
@@ -63,6 +89,7 @@ impl BuildInterruption {
 
 impl Drop for BuildInterruption {
     fn drop(&mut self) {
+        #[cfg(unix)]
         for id in self.registrations {
             signal_hook::low_level::unregister(id);
         }
@@ -111,12 +138,17 @@ fn check_disk(
     next_parquet: u64,
     snapshot: u64,
 ) -> Result<(), AppError> {
-    let stat = rustix::fs::fstatvfs(output.parent())
+    #[cfg(unix)]
+    let free = {
+        let stat = rustix::fs::fstatvfs(output.parent())
+            .map_err(|e| AppError::processing(format!("inspect output free space: {e}")))?;
+        stat.f_bavail
+            .checked_mul(stat.f_frsize)
+            .ok_or_else(|| AppError::processing("free-space arithmetic overflow"))?
+    };
+    #[cfg(windows)]
+    let free = mgwt_windows_native::available_space(output.parent())
         .map_err(|e| AppError::processing(format!("inspect output free space: {e}")))?;
-    let free = stat
-        .f_bavail
-        .checked_mul(stat.f_frsize)
-        .ok_or_else(|| AppError::processing("free-space arithmetic overflow"))?;
     ensure_free_space(free, future_space_need(next_wav, next_parquet, snapshot)?)
 }
 
@@ -399,6 +431,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn injected_signal_flag_requests_cancellation() {
         let interruption = BuildInterruption::new().unwrap();
