@@ -69,7 +69,7 @@ fn identity(fd: impl AsFd) -> Result<(u64, u64, u64, i64, i64), AppError> {
         stat.st_mtime_nsec,
     ))
 }
-fn validate_scratch_outside_app(root: &OwnedFd, scratch: &Path) -> Result<(), AppError> {
+fn validate_scratch_outside_app(root: &OwnedFd, scratch: &Path) -> Result<OwnedFd, AppError> {
     let absolute = if scratch.is_absolute() {
         scratch.to_path_buf()
     } else {
@@ -97,7 +97,7 @@ fn validate_scratch_outside_app(root: &OwnedFd, scratch: &Path) -> Result<(), Ap
             }
         }
     }
-    Ok(())
+    Ok(current)
 }
 fn requested_parent_matches(output: &crate::paths::ValidatedOutputPath) -> Result<(), AppError> {
     let mut current = fs::openat(fs::CWD, "/", DIR_FLAGS, Mode::empty())
@@ -186,16 +186,6 @@ impl VerifiedInputFile {
     }
     fn current_path_identity(&self) -> Result<(u64, u64, u64, i64, i64), AppError> {
         identity(open_relative(&self.root, &self.relative_path)?)
-    }
-    pub fn try_clone_file(&self) -> Result<File, AppError> {
-        self.file
-            .try_clone()
-            .map_err(|e| invalid(format!("clone verified descriptor: {e}")))
-    }
-}
-impl Read for VerifiedInputFile {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
     }
 }
 
@@ -370,7 +360,18 @@ pub struct VerifiedSnapshotSet {
 }
 impl VerifiedBundleInputs {
     pub fn snapshot_set(&mut self, scratch: &Path) -> Result<VerifiedSnapshotSet, AppError> {
-        validate_scratch_outside_app(&self.bundle.root, scratch)?;
+        let bundle_root =
+            fs::fstat(&self.bundle.root).map_err(|e| invalid(format!("stat bundle root: {e}")))?;
+        for resource in &self.resources {
+            let resource_root = fs::fstat(&resource.root)
+                .map_err(|e| invalid(format!("stat resource root: {e}")))?;
+            if (bundle_root.st_dev, bundle_root.st_ino)
+                != (resource_root.st_dev, resource_root.st_ino)
+            {
+                return Err(invalid("bundle and resource app roots differ"));
+            }
+        }
+        let scratch_fd = validate_scratch_outside_app(&self.bundle.root, scratch)?;
         let reserved_bytes = self
             .resources
             .iter()
@@ -378,8 +379,8 @@ impl VerifiedBundleInputs {
                 sum.checked_add(resource.size)
             })
             .ok_or_else(|| invalid("snapshot working set overflow"))?;
-        let free =
-            fs::statvfs(scratch).map_err(|e| invalid(format!("check snapshot disk space: {e}")))?;
+        let free = fs::fstatvfs(&scratch_fd)
+            .map_err(|e| invalid(format!("check snapshot disk space: {e}")))?;
         let available = (free.f_bavail as u64)
             .checked_mul(free.f_frsize as u64)
             .ok_or_else(|| invalid("disk capacity overflow"))?;
@@ -387,14 +388,22 @@ impl VerifiedBundleInputs {
             return Err(invalid("insufficient bundle snapshot disk space"));
         }
         let bundle_size = self.bundle.size;
-        let bundle = VerifiedSnapshot::copy_once(&mut self.bundle, scratch, bundle_size)?;
+        let bundle = VerifiedSnapshot::copy_once_on_bound(
+            &mut self.bundle,
+            rustix::io::dup(&scratch_fd)
+                .map_err(|e| invalid(format!("duplicate scratch descriptor: {e}")))?,
+            bundle_size,
+            &mut |_| Ok(()),
+        )?;
         let mut resources = Vec::with_capacity(self.resources.len());
         for resource in &mut self.resources {
             let resource_size = resource.size;
-            resources.push(VerifiedSnapshot::copy_once(
+            resources.push(VerifiedSnapshot::copy_once_on_bound(
                 resource,
-                scratch,
+                rustix::io::dup(&scratch_fd)
+                    .map_err(|e| invalid(format!("duplicate scratch descriptor: {e}")))?,
                 resource_size,
+                &mut |_| Ok(()),
             )?);
         }
         Ok(VerifiedSnapshotSet {
@@ -449,27 +458,98 @@ pub fn open_bundle_inputs(
     Ok(VerifiedBundleInputs { bundle, resources })
 }
 
+/// Callbacks at deterministic snapshot boundaries support cancellation and race checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotPhase {
+    ScratchBound,
+    StageCreated,
+    Copied(u64),
+}
+
+/// A private directory created and removed relative to the bound scratch descriptor.
+#[derive(Debug)]
+struct OwnedSnapshotDir {
+    scratch: OwnedFd,
+    stage: OwnedFd,
+    name: String,
+    files: Vec<String>,
+}
+impl OwnedSnapshotDir {
+    fn new(scratch: OwnedFd) -> Result<Self, AppError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            ".mgwt-snapshot-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        fs::mkdirat(&scratch, name.as_str(), Mode::from_raw_mode(0o700))
+            .map_err(|e| invalid(format!("create bound snapshot directory: {e}")))?;
+        let stage = match fs::openat(&scratch, name.as_str(), DIR_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(error) => {
+                let _ = fs::unlinkat(&scratch, name.as_str(), fs::AtFlags::REMOVEDIR);
+                return Err(invalid(format!("open bound snapshot directory: {error}")));
+            }
+        };
+        Ok(Self {
+            scratch,
+            stage,
+            name,
+            files: Vec::new(),
+        })
+    }
+}
+impl Drop for OwnedSnapshotDir {
+    fn drop(&mut self) {
+        for file in &self.files {
+            let _ = fs::unlinkat(&self.stage, file.as_str(), fs::AtFlags::empty());
+        }
+        let _ = fs::unlinkat(&self.scratch, self.name.as_str(), fs::AtFlags::REMOVEDIR);
+    }
+}
+
 /// A run-owned, content-addressed, read-only copy for path-only parser dependencies.
-/// Dropping the value removes the entire owned session directory.
+/// The source descriptor is never exposed to a parser.
 #[derive(Debug)]
 pub struct VerifiedSnapshot {
-    owned: tempfile::TempDir,
-    path: std::path::PathBuf,
+    owned: OwnedSnapshotDir,
+    file: File,
     pub size: u64,
     pub sha256: String,
 }
 impl VerifiedSnapshot {
     pub fn copy_once(
         input: &mut VerifiedInputFile,
-        scratch: &std::path::Path,
+        scratch: &Path,
         reservation_bytes: u64,
     ) -> Result<Self, AppError> {
-        validate_scratch_outside_app(&input.root, scratch)?;
+        Self::copy_once_with_checkpoint(input, scratch, reservation_bytes, |_| Ok(()))
+    }
+
+    /// Copy exactly the reserved bytes. A checkpoint error aborts and cleans owned files.
+    pub fn copy_once_with_checkpoint(
+        input: &mut VerifiedInputFile,
+        scratch: &Path,
+        reservation_bytes: u64,
+        mut checkpoint: impl FnMut(SnapshotPhase) -> Result<(), AppError>,
+    ) -> Result<Self, AppError> {
+        let scratch_fd = validate_scratch_outside_app(&input.root, scratch)?;
+        Self::copy_once_on_bound(input, scratch_fd, reservation_bytes, &mut checkpoint)
+    }
+
+    fn copy_once_on_bound(
+        input: &mut VerifiedInputFile,
+        scratch_fd: OwnedFd,
+        reservation_bytes: u64,
+        checkpoint: &mut impl FnMut(SnapshotPhase) -> Result<(), AppError>,
+    ) -> Result<Self, AppError> {
+        use std::io::Write;
         if reservation_bytes != input.size {
             return Err(invalid("snapshot reservation does not match working set"));
         }
-        let free =
-            fs::statvfs(scratch).map_err(|e| invalid(format!("check snapshot disk space: {e}")))?;
+        let free = fs::fstatvfs(&scratch_fd)
+            .map_err(|e| invalid(format!("check snapshot disk space: {e}")))?;
         let available = (free.f_bavail as u64)
             .checked_mul(free.f_frsize as u64)
             .ok_or_else(|| invalid("disk capacity overflow"))?;
@@ -477,53 +557,105 @@ impl VerifiedSnapshot {
             return Err(invalid("insufficient snapshot disk space"));
         }
         input.recheck()?;
-        let owned = tempfile::Builder::new()
-            .prefix("mgwt-snapshot-")
-            .tempdir_in(scratch)
-            .map_err(|e| invalid(format!("create snapshot directory: {e}")))?;
-        let path = owned.path().join(&input.sha256);
-        let mut target = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| invalid(format!("create snapshot: {e}")))?;
+        checkpoint(SnapshotPhase::ScratchBound)?;
+        let mut owned = OwnedSnapshotDir::new(scratch_fd)?;
+        checkpoint(SnapshotPhase::StageCreated)?;
+        let fd = fs::openat(
+            &owned.stage,
+            input.sha256.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|e| invalid(format!("create bound snapshot file: {e}")))?;
+        owned.files.push(input.sha256.clone());
+        let mut target = File::from(fd);
         input
             .file
             .seek(SeekFrom::Start(0))
             .map_err(|e| invalid(format!("rewind verified input: {e}")))?;
-        let copied = std::io::copy(&mut input.file, &mut target)
-            .map_err(|e| invalid(format!("copy snapshot: {e}")))?;
+        let mut copied = 0_u64;
+        let mut chunk = [0_u8; 64 * 1024];
+        while copied < input.size {
+            let remaining = (input.size - copied).min(chunk.len() as u64) as usize;
+            let count = input
+                .file
+                .read(&mut chunk[..remaining])
+                .map_err(|e| invalid(format!("read snapshot source: {e}")))?;
+            if count == 0 {
+                return Err(invalid("snapshot source shrank during copy"));
+            }
+            target
+                .write_all(&chunk[..count])
+                .map_err(|e| invalid(format!("write snapshot: {e}")))?;
+            copied += count as u64;
+            checkpoint(SnapshotPhase::Copied(copied))?;
+        }
+        let mut extra = [0_u8; 1];
+        if input
+            .file
+            .read(&mut extra)
+            .map_err(|e| invalid(format!("check source growth: {e}")))?
+            != 0
+        {
+            return Err(invalid("snapshot source grew beyond reservation"));
+        }
         target
             .sync_all()
             .map_err(|e| invalid(format!("sync snapshot: {e}")))?;
-        if copied != input.size {
-            return Err(invalid("snapshot copy size drift"));
-        }
         input.recheck()?;
-        drop(target);
-        let copy = File::open(&path).map_err(|e| invalid(format!("read snapshot: {e}")))?;
-        let (size, digest) = sha256_reader(copy)?;
+        let fd = fs::openat(
+            &owned.stage,
+            input.sha256.as_str(),
+            FILE_FLAGS,
+            Mode::empty(),
+        )
+        .map_err(|e| invalid(format!("open bound snapshot for verification: {e}")))?;
+        let mut file = File::from(fd);
+        let (size, digest) = sha256_reader(&mut file)?;
         if size != input.size || digest != input.sha256 {
             return Err(invalid("snapshot content drift"));
         }
-        let mut permissions = std::fs::metadata(&path)
-            .map_err(|e| invalid(format!("stat snapshot: {e}")))?
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&path, permissions)
+        fs::fchmod(&target, Mode::from_raw_mode(0o400))
             .map_err(|e| invalid(format!("protect snapshot: {e}")))?;
+        drop(target);
+        file.seek(SeekFrom::Start(0))
+            .map_err(|e| invalid(format!("rewind snapshot: {e}")))?;
         Ok(Self {
             owned,
-            path,
+            file,
             size,
             sha256: digest,
         })
     }
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
+
+    fn verify_owned_bytes(&self) -> Result<(), AppError> {
+        let fd = fs::openat(
+            &self.owned.stage,
+            self.sha256.as_str(),
+            FILE_FLAGS,
+            Mode::empty(),
+        )
+        .map_err(|e| invalid(format!("open snapshot for handoff: {e}")))?;
+        let stat = identity(&fd)?;
+        if stat != identity(&self.file)? {
+            return Err(invalid("snapshot path identity drift"));
+        }
+        let (size, digest) = sha256_reader(File::from(fd))?;
+        if size != self.size || digest != self.sha256 {
+            return Err(invalid("snapshot bytes changed"));
+        }
+        Ok(())
     }
-    pub fn owned_directory(&self) -> &std::path::Path {
-        self.owned.path()
+
+    /// Hand a path-only parser the held read-only file descriptor, with before/after verification.
+    pub fn with_verified_path<T>(&self, parse: impl FnOnce(&Path) -> T) -> Result<T, AppError> {
+        use std::os::fd::AsRawFd;
+        self.verify_owned_bytes()?;
+        let descriptor_path =
+            std::path::PathBuf::from(format!("/dev/fd/{}", self.file.as_raw_fd()));
+        let result = parse(&descriptor_path);
+        self.verify_owned_bytes()?;
+        Ok(result)
     }
 }
 
