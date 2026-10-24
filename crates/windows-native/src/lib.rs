@@ -15,17 +15,19 @@ use std::{
 };
 use windows_sys::{
     Wdk::{
+        Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0, FileFsDeviceInformation,
-            FileFsFullSizeInformation, FileRenameInformation, NtQueryVolumeInformationFile,
-            NtSetInformationFile,
+            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+            FILE_RENAME_INFORMATION_0, FILE_SYNCHRONOUS_IO_NONALERT, FileFsDeviceInformation,
+            FileFsFullSizeInformation, FileRenameInformation, NtCreateFile,
+            NtQueryVolumeInformationFile, NtSetInformationFile,
         },
         System::SystemServices::{
             FILE_FS_DEVICE_INFORMATION, FILE_FS_FULL_SIZE_INFORMATION, FILE_REMOTE_DEVICE,
         },
     },
     Win32::{
-        Foundation::{HANDLE, RtlNtStatusToDosError},
+        Foundation::{HANDLE, INVALID_HANDLE_VALUE, RtlNtStatusToDosError, UNICODE_STRING},
         Security::{
             ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, ACL_SIZE_INFORMATION,
             AclSizeInformation, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
@@ -38,18 +40,19 @@ use windows_sys::{
         },
         Storage::FileSystem::{
             CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS,
-            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-            FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileIdInfo, GetDriveTypeW,
-            GetFileInformationByHandleEx, GetFinalPathNameByHandleW, GetVolumeInformationByHandleW,
-            OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo,
+            FileIdInfo, GetDriveTypeW, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+            GetVolumeInformationByHandleW, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
         },
         System::{
             IO::IO_STATUS_BLOCK,
+            Kernel::OBJ_CASE_INSENSITIVE,
             SystemServices::{FILE_PERSISTENT_ACLS, SECURITY_DESCRIPTOR_REVISION},
             Threading::{GetCurrentProcess, OpenProcessToken},
-            WindowsProgramming::DRIVE_FIXED,
+            WindowsProgramming::{DRIVE_FIXED, FILE_CREATED},
         },
     },
 };
@@ -228,7 +231,7 @@ pub struct StageGuard {
 }
 
 struct StageAcl {
-    descriptor: fs_at::os::windows::SECURITY_DESCRIPTOR,
+    descriptor: SECURITY_DESCRIPTOR,
     _acl_storage: Vec<u32>,
     user_sid: Vec<u32>,
 }
@@ -265,25 +268,14 @@ pub fn create_pinned_stage(parent: &Dir, leaf: &OsStr) -> io::Result<StageGuard>
     require_local_fixed_volume(parent)?;
     require_persistent_acls(parent)?;
     let acl = private_stage_acl()?;
-    let parent_file = File::from(parent.as_handle().try_clone_to_owned()?);
-    let mut options = fs_at::OpenOptions::default();
-    use fs_at::os::windows::OpenOptionsExt;
-    options.follow(false).security_descriptor(acl.descriptor);
-    let created = options.mkdir_at(&parent_file, Path::new(leaf))?;
-    let identity = file_identity(&created)?;
+    let created = create_stage_handle(parent, leaf, &acl)?;
     let result = (|| {
+        let identity = file_identity(&created)?;
         let path = final_path(&created)?;
-        let pinned = open_pinned_directory(&path, true)?;
-        if file_identity(&pinned)? != identity {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "new stage changed before it could be pinned",
-            ));
-        }
-        verify_private_stage_acl(&pinned, &acl.user_sid)?;
+        verify_private_stage_acl(&created, &acl.user_sid)?;
         Ok(StageGuard {
             parent: parent.try_clone()?,
-            dir: Some(Dir::from_std_file(pinned)),
+            dir: Some(Dir::from_std_file(created.try_clone()?)),
             path,
             leaf: leaf.to_os_string(),
             identity,
@@ -294,6 +286,81 @@ pub fn create_pinned_stage(parent: &Dir, leaf: &OsStr) -> io::Result<StageGuard>
         let _ = created.delete_by_handle();
     }
     result
+}
+
+fn create_stage_handle(parent: &Dir, leaf: &OsStr, acl: &StageAcl) -> io::Result<File> {
+    use fs_at::os::windows::FileExt;
+    let mut wide: Vec<u16> = leaf.encode_wide().collect();
+    let name_bytes = wide
+        .len()
+        .checked_mul(size_of::<u16>())
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| invalid_path("stage leaf is too long for a UNICODE_STRING"))?;
+    wide.push(0);
+    let name = UNICODE_STRING {
+        Length: name_bytes,
+        MaximumLength: name_bytes + size_of::<u16>() as u16,
+        Buffer: wide.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: raw_handle(parent),
+        ObjectName: &name,
+        Attributes: OBJ_CASE_INSENSITIVE as u32,
+        SecurityDescriptor: (&acl.descriptor as *const SECURITY_DESCRIPTOR).cast::<c_void>(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    let mut handle: HANDLE = ptr::null_mut();
+    let mut status_block = MaybeUninit::<IO_STATUS_BLOCK>::uninit();
+    // SAFETY: the validated literal leaf is a live, terminated UTF-16 buffer;
+    // the OBJECT_ATTRIBUTES refers to the live bound parent and the absolute
+    // security descriptor, whose ACL storage remains live in StageAcl. The
+    // newly created directory handle is the pin itself: no second open occurs.
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            DELETE
+                | FILE_ADD_FILE
+                | FILE_ADD_SUBDIRECTORY
+                | FILE_LIST_DIRECTORY
+                | FILE_TRAVERSE
+                | FILE_READ_ATTRIBUTES
+                | FILE_WRITE_ATTRIBUTES
+                | READ_CONTROL
+                | SYNCHRONIZE,
+            &attributes,
+            status_block.as_mut_ptr(),
+            ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            ptr::null(),
+            0,
+        )
+    };
+    if status != 0 {
+        // SAFETY: this pure ntdll conversion accepts the returned NTSTATUS.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        return Err(io::Error::from_raw_os_error(code as i32));
+    }
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NtCreateFile returned an invalid stage handle",
+        ));
+    }
+    // SAFETY: a successful NtCreateFile returned this newly owned handle.
+    let file = unsafe { File::from_raw_handle(handle) };
+    // SAFETY: the synchronous creation call initialized IO_STATUS_BLOCK.
+    if unsafe { status_block.assume_init() }.Information as u32 != FILE_CREATED {
+        let _ = file.delete_by_handle();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stage creation did not create a new directory",
+        ));
+    }
+    Ok(file)
 }
 
 pub fn pin_requested_parent_path(path: &Path, expected_dir: &Dir) -> io::Result<PinnedParentPath> {
@@ -511,7 +578,7 @@ fn private_stage_acl() -> io::Result<StageAcl> {
     }
     let mut descriptor = MaybeUninit::<SECURITY_DESCRIPTOR>::uninit();
     // SAFETY: the descriptor output has the required size and alignment;
-    // `acl_ptr` remains live through the later fs_at mkdir_at call.
+    // `acl_ptr` remains live through the later NtCreateFile call.
     unsafe {
         if InitializeSecurityDescriptor(
             descriptor.as_mut_ptr().cast::<c_void>(),
@@ -541,18 +608,6 @@ fn private_stage_acl() -> io::Result<StageAcl> {
             return Err(io::Error::last_os_error());
         }
     }
-    // fs_at 0.2.1 reexports windows-sys 0.52's C SECURITY_DESCRIPTOR, while
-    // this helper uses windows-sys 0.59. Copy each identical C field instead of
-    // transmuting the two Rust types or copying a self-relative descriptor.
-    let descriptor = fs_at::os::windows::SECURITY_DESCRIPTOR {
-        Revision: descriptor.Revision,
-        Sbz1: descriptor.Sbz1,
-        Control: descriptor.Control,
-        Owner: descriptor.Owner,
-        Group: descriptor.Group,
-        Sacl: descriptor.Sacl.cast(),
-        Dacl: descriptor.Dacl.cast(),
-    };
     Ok(StageAcl {
         descriptor,
         _acl_storage: acl_storage,
